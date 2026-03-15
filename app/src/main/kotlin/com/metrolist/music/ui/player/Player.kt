@@ -182,6 +182,13 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import com.metrolist.music.ui.component.Icon as MIcon
 
+import androidx.core.net.toUri
+import androidx.media3.exoplayer.offline.Download
+import androidx.media3.exoplayer.offline.DownloadRequest
+import androidx.media3.exoplayer.offline.DownloadService
+import com.metrolist.music.playback.ExoDownloadService
+import androidx.compose.material3.CircularProgressIndicator
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BottomSheetPlayer(
@@ -191,6 +198,7 @@ fun BottomSheetPlayer(
     pureBlack: Boolean,
 ) {
     val context = LocalContext.current
+    val database = LocalDatabase.current
     val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val menuState = LocalMenuState.current
     val sleepTimerDefaultSetTemplate = stringResource(R.string.sleep_timer_default_set)
@@ -1087,16 +1095,42 @@ fun BottomSheetPlayer(
                             } else {
                                 FilledIconButton(
                                     onClick = {
-                                        val intent =
-                                            Intent().apply {
-                                                action = Intent.ACTION_SEND
-                                                type = "text/plain"
-                                                putExtra(
-                                                    Intent.EXTRA_TEXT,
-                                                    "https://music.youtube.com/watch?v=${mediaMetadata.id}",
-                                                )
+                                        mediaMetadata?.let { meta ->
+                                            when (download?.state) {
+
+                                                Download.STATE_COMPLETED,
+                                                Download.STATE_QUEUED,
+                                                Download.STATE_DOWNLOADING -> {
+
+                                                    DownloadService.sendRemoveDownload(
+                                                        context,
+                                                        ExoDownloadService::class.java,
+                                                        meta.id,
+                                                        false,
+                                                    )
+                                                }
+
+                                                else -> {
+
+                                                    database.transaction {
+                                                        insert(meta)
+                                                    }
+
+                                                    val downloadRequest =
+                                                        DownloadRequest.Builder(meta.id, meta.id.toUri())
+                                                            .setCustomCacheKey(meta.id)
+                                                            .setData(meta.title.toByteArray())
+                                                            .build()
+
+                                                    DownloadService.sendAddDownload(
+                                                        context,
+                                                        ExoDownloadService::class.java,
+                                                        downloadRequest,
+                                                        false,
+                                                    )
+                                                }
                                             }
-                                        context.startActivity(Intent.createChooser(intent, null))
+                                        }
                                     },
                                     shape = shareShape,
                                     colors =
@@ -1106,11 +1140,33 @@ fun BottomSheetPlayer(
                                         ),
                                     modifier = Modifier.size(42.dp),
                                 ) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.share),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(24.dp),
-                                    )
+
+                                    when (download?.state) {
+
+                                        Download.STATE_COMPLETED -> {
+                                            Icon(
+                                                painter = painterResource(R.drawable.offline),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(24.dp),
+                                            )
+                                        }
+
+                                        Download.STATE_QUEUED,
+                                        Download.STATE_DOWNLOADING -> {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(24.dp),
+                                                strokeWidth = 2.dp,
+                                            )
+                                        }
+
+                                        else -> {
+                                            Icon(
+                                                painter = painterResource(R.drawable.download),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(24.dp),
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1209,27 +1265,84 @@ fun BottomSheetPlayer(
                                         .clip(RoundedCornerShape(24.dp))
                                         .background(textButtonColor)
                                         .clickable {
-                                            val intent =
-                                                Intent().apply {
-                                                    action = Intent.ACTION_SEND
-                                                    type = "text/plain"
-                                                    putExtra(
-                                                        Intent.EXTRA_TEXT,
-                                                        "https://music.youtube.com/watch?v=${mediaMetadata.id}",
-                                                    )
+
+                                            mediaMetadata?.let { meta ->
+                                                when (download?.state) {
+
+                                                    Download.STATE_COMPLETED,
+                                                    Download.STATE_QUEUED,
+                                                    Download.STATE_DOWNLOADING -> {
+
+                                                        DownloadService.sendRemoveDownload(
+                                                            context,
+                                                            ExoDownloadService::class.java,
+                                                            meta.id,
+                                                            false,
+                                                        )
+                                                    }
+
+                                                    else -> {
+
+                                                        database.transaction {
+                                                            insert(meta)
+                                                        }
+
+                                                        val downloadRequest =
+                                                            DownloadRequest.Builder(meta.id, meta.id.toUri())
+                                                                .setCustomCacheKey(meta.id)
+                                                                .setData(meta.title.toByteArray())
+                                                                .build()
+
+                                                        DownloadService.sendAddDownload(
+                                                            context,
+                                                            ExoDownloadService::class.java,
+                                                            downloadRequest,
+                                                            false,
+                                                        )
+                                                    }
                                                 }
-                                            context.startActivity(Intent.createChooser(intent, null))
+                                            }
+
                                         },
                             ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.share),
-                                    contentDescription = null,
-                                    tint = iconButtonColor,
-                                    modifier =
-                                        Modifier
-                                            .align(Alignment.Center)
-                                            .size(24.dp),
-                                )
+
+                                when (download?.state) {
+
+                                    Download.STATE_COMPLETED -> {
+                                        Icon(
+                                            painter = painterResource(R.drawable.offline),
+                                            contentDescription = null,
+                                            tint = iconButtonColor,
+                                            modifier =
+                                                Modifier
+                                                    .align(Alignment.Center)
+                                                    .size(24.dp),
+                                        )
+                                    }
+
+                                    Download.STATE_QUEUED,
+                                    Download.STATE_DOWNLOADING -> {
+                                        CircularProgressIndicator(
+                                            modifier =
+                                                Modifier
+                                                    .align(Alignment.Center)
+                                                    .size(24.dp),
+                                            strokeWidth = 2.dp,
+                                        )
+                                    }
+
+                                    else -> {
+                                        Icon(
+                                            painter = painterResource(R.drawable.download),
+                                            contentDescription = null,
+                                            tint = iconButtonColor,
+                                            modifier =
+                                                Modifier
+                                                    .align(Alignment.Center)
+                                                    .size(24.dp),
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

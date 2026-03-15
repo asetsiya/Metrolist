@@ -348,7 +348,7 @@ private fun NewMiniPlayer(
 
                 // Subscribe button - isolated composable
                 mediaMetadata?.artists?.firstOrNull()?.id?.let { artistId ->
-                    SubscribeButton(artistId = artistId, metadata = mediaMetadata!!)
+                //    SubscribeButton(artistId = artistId, metadata = mediaMetadata!!)
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))
