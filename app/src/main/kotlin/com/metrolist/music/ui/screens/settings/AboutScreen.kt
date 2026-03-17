@@ -99,24 +99,24 @@ private data class CommunityLink(
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 private val leadDeveloper = Contributor(
-    name = "Mo Agamy",
+    name = "AsetSiya",
     roleRes = R.string.credits_lead_developer,
-    githubHandle = "mostafaalagamy",
+    githubHandle = "asetsiya",
     polygon = MaterialShapes.Cookie9Sided,
     favoriteSongVideoId = "Mh2JWGWvy_Y"
 )
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 private val collaborators = listOf(
-    Contributor(name = "Adriel O'Connel", roleRes = R.string.credits_collaborator, githubHandle = "adrielGGmotion", polygon = MaterialShapes.Cookie4Sided, favoriteSongVideoId = "m2zUrruKjDQ"),
-    Contributor(name = "Nyx", roleRes = R.string.credits_collaborator, githubHandle = "nyxiereal", polygon = MaterialShapes.Cookie12Sided, favoriteSongVideoId = "zselaN6zPXw"), // More mass for face
+    //Contributor(name = "Adriel O'Connel", roleRes = R.string.credits_collaborator, githubHandle = "adrielGGmotion", polygon = MaterialShapes.Cookie4Sided, favoriteSongVideoId = "m2zUrruKjDQ"),
+    Contributor(name = "GabakCorbasi", roleRes = R.string.credits_collaborator, githubHandle = "gabakcorbasi", polygon = MaterialShapes.Cookie12Sided, favoriteSongVideoId = "zselaN6zPXw"), // More mass for face
 )
 
 private val communityLinks = listOf(
-    CommunityLink(R.string.credits_discord, R.drawable.discord, "https://discord.gg/rJwDxXsf8c"),
-    CommunityLink(R.string.credits_telegram, R.drawable.telegram, "https://t.me/metrolistapp"),
-    CommunityLink(R.string.credits_view_repo, R.drawable.github, "https://github.com/MetrolistGroup/Metrolist"),
-    CommunityLink(R.string.credits_license_name, R.drawable.info, "https://github.com/MetrolistGroup/Metrolist/blob/main/LICENSE")
+    //CommunityLink(R.string.credits_discord, R.drawable.discord, "https://discord.gg/rJwDxXsf8c"),
+    CommunityLink(R.string.credits_telegram, R.drawable.telegram, "https://t.me/sttryq"),
+    //CommunityLink(R.string.credits_view_repo, R.drawable.github, "https://github.com/MetrolistGroup/Metrolist"),
+    //CommunityLink(R.string.credits_license_name, R.drawable.info, "https://github.com/MetrolistGroup/Metrolist/blob/main/LICENSE")
 )
 
 private fun handleEasterEggClick(
@@ -171,7 +171,7 @@ private fun ContributorAvatar(
     contentDescription: String? = null,
     onClick: (() -> Unit)? = null
 ) {
-    val fallback = painterResource(R.drawable.small_icon)
+    val fallback = painterResource(R.drawable.ic_launcher_monochrome)
     Surface(
         onClick = onClick ?: {},
         enabled = onClick != null,
@@ -261,7 +261,7 @@ private fun ActionCard(
                     )
                 }
             }
-            
+
             Spacer(Modifier.width(20.dp))
             Column {
                 Text(
@@ -293,7 +293,7 @@ fun AboutScreen(
     val localSnackbarHostState = remember { SnackbarHostState() }
     val wannaPlayStr = stringResource(R.string.wanna_play_favorite_song)
     val yeahStr = stringResource(R.string.yeah)
-    
+
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -312,9 +312,9 @@ fun AboutScreen(
                     LocalPlayerAwareWindowInsets.current.only(WindowInsetsSides.Top)
                 )
             )
-    
+
             Spacer(Modifier.height(16.dp))
-    
+
             Surface(
                 shape = RoundedCornerShape(32.dp),
                 color = MaterialTheme.colorScheme.surfaceContainer,
@@ -328,22 +328,22 @@ fun AboutScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(80.dp)
-                            .clip(MaterialShapes.SoftBurst.toShape())
-                            .background(MaterialTheme.colorScheme.primaryContainer),
+                            .size(80.dp),
+                            //.clip(MaterialShapes.SoftBurst.toShape())
+                            //.background(MaterialTheme.colorScheme.primaryContainer),
                         contentAlignment = Alignment.Center
                     ) {
                         androidx.compose.foundation.Image(
-                            painter = painterResource(R.drawable.small_icon),
+                            painter = painterResource(R.drawable.ic_launcher_monochrome),
                             contentDescription = stringResource(R.string.metrolist),
                             colorFilter = ColorFilter.tint(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                                 blendMode = BlendMode.SrcIn,
                             ),
-                            modifier = Modifier.size(40.dp)
+                            modifier = Modifier.size(7000.dp)
                         )
                     }
-            
+
                     Spacer(Modifier.height(16.dp))
             
                     Text(
@@ -388,152 +388,154 @@ fun AboutScreen(
                 trackColor = Color.Transparent,
                 amplitude = { 1f }
             )
-    
-            Spacer(Modifier.height(32.dp))
-    
-            SectionHeader(stringResource(R.string.credits_lead_developer))
-    
-            var leadClickCount by remember(leadDeveloper.name) { mutableIntStateOf(0) }
-    
-            // Large Avatar
-            ContributorAvatar(
-                avatarUrl = leadDeveloper.avatarUrl,
-                sizeDp = 180,
-                shape = leadDeveloper.polygon?.toShape() ?: CircleShape,
-                contentDescription = leadDeveloper.name,
-                onClick = {
-                    handleEasterEggClick(
-                        clickCount = leadClickCount,
-                        favoriteSongVideoId = leadDeveloper.favoriteSongVideoId,
-                        coroutineScope = coroutineScope,
-                        snackbarHostState = localSnackbarHostState,
-                        playerConnection = playerConnection,
-                        wannaPlayStr = wannaPlayStr,
-                        yeahStr = yeahStr,
-                        onCountUpdate = { leadClickCount = it }
-                    )
-                }
-            )
-    
-            Spacer(Modifier.height(24.dp))
-    
-            Text(
-                text = leadDeveloper.name,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-    
-            Spacer(Modifier.height(32.dp))
-    
-            // Segmented buttons (Website, GitHub, Instagram)
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp)
-            ) {
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    SegmentedActionButton(
-                        label = stringResource(R.string.credits_website),
-                        iconRes = R.drawable.language,
-                        iconSize = 24.dp,
-                        onClick = { uriHandler.openUri("https://metrolist.meowery.eu") }
-                    )
-                    
-                    Box(modifier = Modifier.width(1.dp).height(72.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha=0.5f)))
-                    
-                    SegmentedActionButton(
-                        label = stringResource(R.string.credits_github),
-                        iconRes = R.drawable.github,
-                        iconSize = 24.dp,
-                        onClick = { uriHandler.openUri("https://github.com/mostafaalagamy") }
-                    )
-                    
-                    Box(modifier = Modifier.width(1.dp).height(72.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha=0.5f)))
-                    
-                    SegmentedActionButton(
-                        label = stringResource(R.string.credits_instagram),
-                        iconRes = R.drawable.instagram,
-                        iconSize = 20.dp,
-                        onClick = { uriHandler.openUri("https://www.instagram.com/mostafaalagamy") }
-                    )
-                }
-            }
-    
-            Spacer(Modifier.height(16.dp))
-    
-            ActionCard(
-                title = stringResource(R.string.like_what_i_do),
-                subtitle = stringResource(R.string.buy_mo_a_coffee),
-                iconRes = R.drawable.buymeacoffee,
-                onClick = { uriHandler.openUri("https://buymeacoffee.com/mostafaalagamy") }
-            )
-    
-            Spacer(Modifier.height(48.dp))
-    
-            SectionHeader(stringResource(R.string.credits_collaborators_section))
-    
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerLow,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp)
-            ) {
-                Column(modifier = Modifier.padding(vertical = 8.dp)) {
-                    collaborators.forEachIndexed { index, contributor ->
-                        var clickCount by remember(contributor.name) { mutableIntStateOf(0) }
-                        ListItem(
-                            headlineContent = {
-                                Text(
-                                    text = contributor.name,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            },
-                            supportingContent = { Text(stringResource(contributor.roleRes)) },
-                            leadingContent = {
-                                    ContributorAvatar(
-                                        avatarUrl = contributor.avatarUrl,
-                                        sizeDp = 56,
-                                        shape = contributor.polygon?.toShape() ?: CircleShape,
-                                        contentDescription = contributor.name,
-                                        onClick = {
-                                        handleEasterEggClick(
-                                            clickCount = clickCount,
-                                            favoriteSongVideoId = contributor.favoriteSongVideoId,
-                                            coroutineScope = coroutineScope,
-                                            snackbarHostState = localSnackbarHostState,
-                                            playerConnection = playerConnection,
-                                            wannaPlayStr = wannaPlayStr,
-                                            yeahStr = yeahStr,
-                                            onCountUpdate = { clickCount = it }
-                                        )
-                                    }
-                                )
-                            },
-                            trailingContent = {
-                                Icon(
-                                    painter = painterResource(R.drawable.github),
-                                    contentDescription = stringResource(R.string.credits_github),
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            },
-                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                            modifier = Modifier.clickable { uriHandler.openUri(contributor.githubUrl) }
-                        )
-                        
-                        if (index < collaborators.lastIndex) {
-                            HorizontalDivider(
-                                modifier = Modifier.padding(horizontal = 20.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+            /*
+                    Spacer(Modifier.height(32.dp))
+
+                    SectionHeader(stringResource(R.string.credits_lead_developer))
+
+                    var leadClickCount by remember(leadDeveloper.name) { mutableIntStateOf(0) }
+
+                    // Large Avatar
+                    ContributorAvatar(
+                        avatarUrl = leadDeveloper.avatarUrl,
+                        sizeDp = 180,
+                        shape = leadDeveloper.polygon?.toShape() ?: CircleShape,
+                        contentDescription = leadDeveloper.name,
+                        onClick = {
+                            handleEasterEggClick(
+                                clickCount = leadClickCount,
+                                favoriteSongVideoId = leadDeveloper.favoriteSongVideoId,
+                                coroutineScope = coroutineScope,
+                                snackbarHostState = localSnackbarHostState,
+                                playerConnection = playerConnection,
+                                wannaPlayStr = wannaPlayStr,
+                                yeahStr = yeahStr,
+                                onCountUpdate = { leadClickCount = it }
                             )
                         }
+                    )
+
+                    Spacer(Modifier.height(24.dp))
+
+                    Text(
+                        text = leadDeveloper.name,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+
+                    Spacer(Modifier.height(32.dp))
+
+                    // Segmented buttons (Website, GitHub, Instagram)
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp)
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            /*
+                            SegmentedActionButton(
+                                label = stringResource(R.string.credits_website),
+                                iconRes = R.drawable.language,
+                                iconSize = 24.dp,
+                                onClick = { uriHandler.openUri("https://metrolist.meowery.eu") }
+                            )
+
+                            Box(modifier = Modifier.width(1.dp).height(72.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha=0.5f)))
+                            */
+                            SegmentedActionButton(
+                                label = stringResource(R.string.credits_github),
+                                iconRes = R.drawable.github,
+                                iconSize = 24.dp,
+                                onClick = { uriHandler.openUri("https://github.com/asetsiya") }
+                            )
+                            /*
+                            Box(modifier = Modifier.width(1.dp).height(72.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha=0.5f)))
+
+                            SegmentedActionButton(
+                                label = stringResource(R.string.credits_instagram),
+                                iconRes = R.drawable.instagram,
+                                iconSize = 20.dp,
+                                onClick = { uriHandler.openUri("https://www.instagram.com/mostafaalagamy") }
+                            )
+                            */
+                        }
                     }
-                }
-            }
-    
+
+                    Spacer(Modifier.height(16.dp))
+
+                    ActionCard(
+                        title = stringResource(R.string.like_what_i_do),
+                        subtitle = stringResource(R.string.buy_mo_a_coffee),
+                        iconRes = R.drawable.buymeacoffee,
+                        onClick = { uriHandler.openUri("https://buymeacoffee.com/mostafaalagamy") }
+                    )
+
+                    Spacer(Modifier.height(48.dp))
+
+                    SectionHeader(stringResource(R.string.credits_collaborators_section))
+
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                            collaborators.forEachIndexed { index, contributor ->
+                                var clickCount by remember(contributor.name) { mutableIntStateOf(0) }
+                                ListItem(
+                                    headlineContent = {
+                                        Text(
+                                            text = contributor.name,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    },
+                                    supportingContent = { Text(stringResource(contributor.roleRes)) },
+                                    leadingContent = {
+                                            ContributorAvatar(
+                                                avatarUrl = contributor.avatarUrl,
+                                                sizeDp = 56,
+                                                shape = contributor.polygon?.toShape() ?: CircleShape,
+                                                contentDescription = contributor.name,
+                                                onClick = {
+                                                handleEasterEggClick(
+                                                    clickCount = clickCount,
+                                                    favoriteSongVideoId = contributor.favoriteSongVideoId,
+                                                    coroutineScope = coroutineScope,
+                                                    snackbarHostState = localSnackbarHostState,
+                                                    playerConnection = playerConnection,
+                                                    wannaPlayStr = wannaPlayStr,
+                                                    yeahStr = yeahStr,
+                                                    onCountUpdate = { clickCount = it }
+                                                )
+                                            }
+                                        )
+                                    },
+                                    trailingContent = {
+                                        Icon(
+                                            painter = painterResource(R.drawable.github),
+                                            contentDescription = stringResource(R.string.credits_github),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    },
+                                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                    modifier = Modifier.clickable { uriHandler.openUri(contributor.githubUrl) }
+                                )
+
+                                if (index < collaborators.lastIndex) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(horizontal = 20.dp),
+                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    */
             Spacer(Modifier.height(32.dp))
     
             SectionHeader(stringResource(R.string.community_and_info))
@@ -566,7 +568,7 @@ fun AboutScreen(
                     }
                 }
             }
-    
+    /*
             Spacer(Modifier.height(32.dp))
             
             Text(
@@ -577,6 +579,7 @@ fun AboutScreen(
             )
             
             Spacer(Modifier.height(40.dp))
+            */
         }
 
         TopAppBar(
