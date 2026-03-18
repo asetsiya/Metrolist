@@ -1696,6 +1696,7 @@ fun BottomSheetPlayer(
                                             },
                                         modifier = Modifier.size(32.dp),
                                     )
+                                    /*
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
                                         text =
@@ -1706,6 +1707,7 @@ fun BottomSheetPlayer(
                                             },
                                         style = MaterialTheme.typography.titleMedium,
                                     )
+                                    */
                                 }
                             }
 
