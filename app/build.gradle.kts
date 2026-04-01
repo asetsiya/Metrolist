@@ -34,8 +34,8 @@ android {
         applicationId = applicationIdOverride ?: baseApplicationId
         minSdk = 26
         targetSdk = 36
-        versionCode = 143
-        versionName = "13.3.0"
+        versionCode = 144
+        versionName = "13.4.0"
         resValue("string", "app_name", appNameOverride ?: "Müzikçi")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -271,8 +271,8 @@ dependencies {
     implementation(project(":kizzy"))
     implementation(project(":lastfm"))
     implementation(project(":betterlyrics"))
-    implementation(project(":simpmusic"))
     implementation(project(":shazamkit"))
+    implementation(project(":paxsenix"))
 
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.cio)

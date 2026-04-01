@@ -43,6 +43,7 @@ import com.metrolist.music.ui.screens.search.OnlineSearchResult
 import com.metrolist.music.ui.screens.search.SearchScreen
 import com.metrolist.music.ui.screens.settings.AboutScreen
 import com.metrolist.music.ui.screens.settings.AiSettings
+import com.metrolist.music.ui.screens.settings.AndroidAutoSettings
 import com.metrolist.music.ui.screens.settings.AppearanceSettings
 import com.metrolist.music.ui.screens.settings.BackupAndRestore
 import com.metrolist.music.ui.screens.settings.ContentSettings
@@ -75,7 +76,7 @@ fun NavGraphBuilder.navigationBuilder(
         HomeScreen(navController = navController, snackbarHostState = snackbarHostState)
     }
 
-    composable(Screens.Search.route) {
+    composable(Screens.Search.route) { backStackEntry ->
         val pureBlackEnabled by rememberPreference(PureBlackKey, defaultValue = false)
         val darkTheme by rememberEnumPreference(DarkModeKey, defaultValue = DarkMode.AUTO)
         val isSystemInDarkTheme = isSystemInDarkTheme()
@@ -90,6 +91,7 @@ fun NavGraphBuilder.navigationBuilder(
         SearchScreen(
             navController = navController,
             pureBlack = pureBlack,
+            savedStateHandle = backStackEntry.savedStateHandle
         )
     }
 
@@ -174,8 +176,12 @@ fun NavGraphBuilder.navigationBuilder(
         popExitTransition = {
             fadeOut(tween(200))
         },
-    ) {
-        OnlineSearchResult(navController)
+    ) { backStackEntry ->
+        OnlineSearchResult(
+            navController = navController,
+            savedStateHandle = backStackEntry.savedStateHandle
+        )
+
     }
 
     composable(
@@ -404,7 +410,7 @@ fun NavGraphBuilder.navigationBuilder(
     }
 
     composable("settings/about") {
-        AboutScreen(navController, scrollBehavior)
+        AboutScreen(navController)
     }
 
     composable("login") {
@@ -434,5 +440,8 @@ fun NavGraphBuilder.navigationBuilder(
 
     composable("recognition_history") {
         RecognitionHistoryScreen(navController)
+    }
+    composable("settings/android_auto") {
+        AndroidAutoSettings(navController, scrollBehavior)
     }
 }
