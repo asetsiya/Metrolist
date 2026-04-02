@@ -118,8 +118,8 @@ fun ListenTogetherSettings(
     val servers = remember { ListenTogetherServers.servers }
     var serverUrl by rememberPreference(ListenTogetherServerUrlKey, ListenTogetherServers.defaultServerUrl)
     var username by rememberPreference(ListenTogetherUsernameKey, "")
-    var autoApprovalJoins by rememberPreference(ListenTogetherAutoApprovalKey, false)
-    var autoApproveSuggestions by rememberPreference(ListenTogetherAutoApproveSuggestionsKey, false)
+    var autoApprovalJoins by rememberPreference(ListenTogetherAutoApprovalKey, true)
+    var autoApproveSuggestions by rememberPreference(ListenTogetherAutoApproveSuggestionsKey, true)
     var syncHostVolume by rememberPreference(ListenTogetherSyncVolumeKey, true)
 
     var showServerUrlDialog by rememberSaveable { mutableStateOf(false) }

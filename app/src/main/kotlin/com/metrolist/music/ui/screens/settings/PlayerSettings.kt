@@ -156,7 +156,7 @@ fun PlayerSettings(
     )
     val (autoSkipNextOnError, onAutoSkipNextOnErrorChange) = rememberPreference(
         AutoSkipNextOnErrorKey,
-        defaultValue = false
+        defaultValue = true
     )
     val (persistentShuffleAcrossQueues, onPersistentShuffleAcrossQueuesChange) = rememberPreference(
         PersistentShuffleAcrossQueuesKey,
@@ -180,7 +180,7 @@ fun PlayerSettings(
     )
     val (pauseOnMute, onPauseOnMuteChange) = rememberPreference(
         PauseOnMute,
-        defaultValue = false
+        defaultValue = true
     )
     val (resumeOnBluetoothConnect, onResumeOnBluetoothConnectChange) = rememberPreference(
         ResumeOnBluetoothConnectKey,

@@ -455,6 +455,7 @@ private fun NewMiniPlayer(
                 }
 
 // Subscribe button - isolated composable
+                /*
                 mediaMetadata?.artists?.firstOrNull()?.id?.let { artistId ->
                     SubscribeButton(
                         artistId = artistId,
@@ -485,7 +486,7 @@ private fun NewMiniPlayer(
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))
-
+*/
 // Favorite button - isolated composable
                 mediaMetadata?.let { FavoriteButton(
                     songId = it.id,
