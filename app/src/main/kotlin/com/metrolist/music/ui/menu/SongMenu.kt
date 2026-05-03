@@ -183,6 +183,50 @@ fun SongMenu(
         )
     }
 
+    if (showEditDialog) {
+        TextFieldDialog(
+            icon = {
+                Icon(
+                    painter = painterResource(R.drawable.edit),
+                    contentDescription = null,
+                )
+            },
+            title = {
+                Text(text = stringResource(R.string.edit_song))
+            },
+            textFields =
+                listOf(
+                    stringResource(R.string.song_title) to titleField,
+                    stringResource(R.string.artist_name) to artistField,
+                ),
+            onTextFieldsChange = { index, newValue ->
+                if (index == 0) {
+                    titleField = newValue
+                } else {
+                    artistField = newValue
+                }
+            },
+            onDoneMultiple = { values ->
+                val newTitle = values[0]
+                val newArtist = values[1]
+
+                coroutineScope.launch {
+                    database.query {
+                        update(song.song.copy(title = newTitle))
+                        val artist = song.artists.firstOrNull()
+                        if (artist != null) {
+                            update(artist.copy(name = newArtist))
+                        }
+                    }
+
+                    showEditDialog = false
+                    onDismiss()
+                }
+            },
+            onDismiss = { showEditDialog = false },
+        )
+    }
+
     var showChoosePlaylistDialog by rememberSaveable {
         mutableStateOf(false)
     }
@@ -1083,7 +1127,6 @@ fun SongMenu(
                                     )
                                 },
                                 onClick = {
-                                    //onDismiss()
                                     showEditDialog = true
                                 },
                             ),
@@ -1110,48 +1153,5 @@ fun SongMenu(
                     },
             )
         }
-    }
-    if (showEditDialog) {
-        TextFieldDialog(
-            icon = {
-                Icon(
-                    painter = painterResource(R.drawable.edit),
-                    contentDescription = null,
-                )
-            },
-            title = {
-                Text(text = stringResource(R.string.edit_song))
-            },
-            textFields =
-                listOf(
-                    stringResource(R.string.song_title) to titleField,
-                    stringResource(R.string.artist_name) to artistField,
-                ),
-            onTextFieldsChange = { index, newValue ->
-                if (index == 0) {
-                    titleField = newValue
-                } else {
-                    artistField = newValue
-                }
-            },
-            onDoneMultiple = { values ->
-                val newTitle = values[0]
-                val newArtist = values[1]
-
-                coroutineScope.launch {
-                    database.query {
-                        update(song.song.copy(title = newTitle))
-                        val artist = song.artists.firstOrNull()
-                        if (artist != null) {
-                            update(artist.copy(name = newArtist))
-                        }
-                    }
-
-                    showEditDialog = false
-                    onDismiss()
-                }
-            },
-            onDismiss = { showEditDialog = false },
-        )
     }
 }
