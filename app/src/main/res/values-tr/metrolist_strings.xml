@@ -263,7 +263,7 @@
     <string name="wrapped_playlist_saved">Oynatma listesi kaydedildi</string>
     <string name="casting_to">%s cihazına yansıtılıyor</string>
     <string name="progress_percent">İlerleme %s%%</string>
-    <string name="listening_to_metrolist">Müzikçi'den dinleniyor</string>
+    <string name="listening_to_metrolist">Müzikçi\'den dinleniyor</string>
     <string name="open">Aç</string>
     <string name="failed_to_create_image">Görsel oluşturulamadı: %s</string>
     <string name="copied_title">Başlık kopyalandı</string>
@@ -535,8 +535,8 @@
     <string name="discord_rpc_preview">Rich Presence önizlemesi</string>
     <string name="discord_presence">Durum</string>
     <string name="discord_connect_description">Ne dinlediğini paylaşmak için Discord\'a giriş yap</string>
-    <string name="discord_playing_metrolist">Müzikçi'den çalıynıor</string>
-    <string name="discord_watching_metrolist">Müzikçi'den izleniyor</string>
+    <string name="discord_playing_metrolist">Müzikçi\'den çalınıyor</string>
+    <string name="discord_watching_metrolist">Müzikçi\'den izleniyor</string>
     <string name="discord_competing_metrolist">Müzikçi\'de yarışıyor</string>
     <string name="discord_activity_name">Etkinlik adı</string>
     <string name="discord_activity_name_description">Etkinlik için özel ad. Varsayılanı kullanmak için boş bırakın</string>
