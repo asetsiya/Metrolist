@@ -183,50 +183,6 @@ fun SongMenu(
         )
     }
 
-    if (showEditDialog) {
-        TextFieldDialog(
-            icon = {
-                Icon(
-                    painter = painterResource(R.drawable.edit),
-                    contentDescription = null,
-                )
-            },
-            title = {
-                Text(text = stringResource(R.string.edit_song))
-            },
-            textFields =
-                listOf(
-                    stringResource(R.string.song_title) to titleField,
-                    stringResource(R.string.artist_name) to artistField,
-                ),
-            onTextFieldsChange = { index, newValue ->
-                if (index == 0) {
-                    titleField = newValue
-                } else {
-                    artistField = newValue
-                }
-            },
-            onDoneMultiple = { values ->
-                val newTitle = values[0]
-                val newArtist = values[1]
-
-                coroutineScope.launch {
-                    database.query {
-                        update(song.song.copy(title = newTitle))
-                        val artist = song.artists.firstOrNull()
-                        if (artist != null) {
-                            update(artist.copy(name = newArtist))
-                        }
-                    }
-
-                    showEditDialog = false
-                    onDismiss()
-                }
-            },
-            onDismiss = { showEditDialog = false },
-        )
-    }
-
     var showChoosePlaylistDialog by rememberSaveable {
         mutableStateOf(false)
     }
@@ -513,19 +469,26 @@ fun SongMenu(
         item {
             NewActionGrid(
                 actions =
-                    listOf(
-                        NewAction(
-                            icon = {
-                                Icon(
-                                    painter = painterResource(R.drawable.edit),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(28.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            },
-                            text = stringResource(R.string.edit),
-                            onClick = { showEditDialog = true },
-                        ),
+                    listOfNotNull(
+                        if (!isGuest) {
+                            NewAction(
+                                icon = {
+                                    Icon(
+                                        painter = painterResource(R.drawable.playlist_play),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(28.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                },
+                                text = stringResource(R.string.play_next),
+                                onClick = {
+                                    onDismiss()
+                                    playerConnection.playNext(song.toMediaItem())
+                                },
+                            )
+                        } else {
+                            null
+                        },
                         NewAction(
                             icon = {
                                 Icon(
@@ -607,24 +570,6 @@ fun SongMenu(
                                 onClick = {
                                     onDismiss()
                                     playerConnection.playQueue(YouTubeQueue.radio(song.toMediaMetadata()))
-                                },
-                            )
-                        } else {
-                            null
-                        },
-                        if (!isGuest) {
-                            Material3MenuItemData(
-                                title = { Text(text = stringResource(R.string.play_next)) },
-                                description = { Text(text = stringResource(R.string.play_next_desc)) },
-                                icon = {
-                                    Icon(
-                                        painter = painterResource(R.drawable.playlist_play),
-                                        contentDescription = null,
-                                    )
-                                },
-                                onClick = {
-                                    onDismiss()
-                                    playerConnection.playNext(song.toMediaItem())
                                 },
                             )
                         } else {
@@ -1126,6 +1071,24 @@ fun SongMenu(
                                 },
                             ),
                         )
+
+                        add(
+                            Material3MenuItemData(
+                                title = { Text(text = stringResource(R.string.edit)) },
+                                description = { Text(text = stringResource(R.string.edit)) },
+                                icon = {
+                                    Icon(
+                                        painter = painterResource(R.drawable.edit),
+                                        contentDescription = null,
+                                    )
+                                },
+                                onClick = {
+                                    //onDismiss()
+                                    showEditDialog = true
+                                },
+                            ),
+                        )
+
                         add(
                             Material3MenuItemData(
                                 title = { Text(text = stringResource(R.string.details)) },
@@ -1147,5 +1110,48 @@ fun SongMenu(
                     },
             )
         }
+    }
+    if (showEditDialog) {
+        TextFieldDialog(
+            icon = {
+                Icon(
+                    painter = painterResource(R.drawable.edit),
+                    contentDescription = null,
+                )
+            },
+            title = {
+                Text(text = stringResource(R.string.edit_song))
+            },
+            textFields =
+                listOf(
+                    stringResource(R.string.song_title) to titleField,
+                    stringResource(R.string.artist_name) to artistField,
+                ),
+            onTextFieldsChange = { index, newValue ->
+                if (index == 0) {
+                    titleField = newValue
+                } else {
+                    artistField = newValue
+                }
+            },
+            onDoneMultiple = { values ->
+                val newTitle = values[0]
+                val newArtist = values[1]
+
+                coroutineScope.launch {
+                    database.query {
+                        update(song.song.copy(title = newTitle))
+                        val artist = song.artists.firstOrNull()
+                        if (artist != null) {
+                            update(artist.copy(name = newArtist))
+                        }
+                    }
+
+                    showEditDialog = false
+                    onDismiss()
+                }
+            },
+            onDismiss = { showEditDialog = false },
+        )
     }
 }
