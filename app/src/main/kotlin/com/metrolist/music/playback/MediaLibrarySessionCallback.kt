@@ -160,6 +160,7 @@ constructor(
         params: MediaLibraryService.LibraryParams?,
     ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> =
         scope.future(Dispatchers.IO) {
+            try {
             LibraryResult.ofItemList(
                 when (parentId) {
                     MusicService.ROOT -> {
@@ -168,7 +169,8 @@ constructor(
                             serializeSections(AndroidAutoSection.values().map { it to true })
                         )
                         val sections = deserializeSections(sectionsRaw)
-                        sections
+                        val showYoutubePlaylists = context.dataStore.get(AndroidAutoYouTubePlaylistsKey, false)
+                        val rootItems = sections
                             .filter { (_, enabled) -> enabled }
                             .ifEmpty { listOf(AndroidAutoSection.LIKED to true) }
                             .map { (section, _) ->
@@ -210,6 +212,17 @@ constructor(
                                     )
                                 }
                             }
+                        if (showYoutubePlaylists) {
+                            rootItems + browsableMediaItem(
+                                MusicService.YOUTUBE_PLAYLIST,
+                                context.getString(R.string.mixes),
+                                null,
+                                drawableUri(R.drawable.explore_outlined),
+                                MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS,
+                            )
+                        } else {
+                            rootItems
+                        }
                     }
 
 
@@ -247,10 +260,8 @@ constructor(
                     MusicService.PLAYLIST -> {
                         val likedSongCount = database.likedSongsCount().first()
                         val downloadedSongCount = downloadUtil.downloads.value.size
-                        val showYoutubePlaylists = context.dataStore.get(AndroidAutoYouTubePlaylistsKey, false)
 
-                        // Build local playlists immediately
-                        val localItems = listOf(
+                        listOf(
                             browsableMediaItem(
                                 "${MusicService.PLAYLIST}/${PlaylistEntity.LIKED_PLAYLIST_ID}",
                                 context.getString(R.string.liked_songs),
@@ -274,30 +285,52 @@ constructor(
                                 MediaMetadata.MEDIA_TYPE_PLAYLIST,
                             )
                         }
+                    }
 
-                        // Fetch YouTube playlists asynchronously if enabled
-                        if (showYoutubePlaylists) {
-                            scope.launch(Dispatchers.IO) {
-                               try {
-                                    val youtubePlaylists = YouTube.home().getOrNull()?.sections
-                                        ?.flatMap { it.items }
-                                        ?.filterIsInstance<PlaylistItem>()
-                                        ?.take(10)
-                                        ?: emptyList()
+                    MusicService.YOUTUBE_PLAYLIST -> {
+                        if (!context.dataStore.get(AndroidAutoYouTubePlaylistsKey, false)) {
+                            emptyList()
+                        } else {
+                            try {
+                                val allSections = mutableListOf<com.metrolist.innertube.pages.HomePage.Section>()
+                                var continuation: String? = null
+                                val maxPages = 4
 
-                                    if (youtubePlaylists.isNotEmpty()) {
-                                        session.notifyChildrenChanged(
-                                            MusicService.PLAYLIST,
-                                            localItems.size + youtubePlaylists.size,
-                                            null
-                                        )
-                                    }
-                                } catch (e: Exception) {
-                                    reportException(e)
+                                for (page in 0 until maxPages) {
+                                    val result = YouTube.home(continuation)
+                                        .onFailure { reportException(it) }
+                                        .getOrNull() ?: break
+                                    allSections.addAll(result.sections)
+                                    continuation = result.continuation
+                                    if (continuation == null) break
                                 }
+
+                                // Drop playlists already saved to the local library,
+                                // which are exposed under MusicService.PLAYLIST.
+                                val savedBrowseIds = database.playlistsByCreateDateAsc()
+                                    .first()
+                                    .mapNotNullTo(mutableSetOf()) { it.playlist.browseId }
+
+                                val playlists = allSections
+                                    .flatMap { it.items }
+                                    .filterIsInstance<PlaylistItem>()
+                                    .filterNot { it.id in savedBrowseIds }
+                                    .distinctBy { it.id }
+
+                                playlists.map { playlist ->
+                                    browsableMediaItem(
+                                        "${MusicService.YOUTUBE_PLAYLIST}/${playlist.id}",
+                                        playlist.title,
+                                        playlist.author?.name,
+                                        playlist.thumbnail?.toUri(),
+                                        MediaMetadata.MEDIA_TYPE_PLAYLIST,
+                                    )
+                                }
+                            } catch (e: Exception) {
+                                reportException(e)
+                                emptyList()
                             }
                         }
-                        localItems
                     }
 
                     else ->
@@ -410,6 +443,10 @@ constructor(
                 },
                 params,
             )
+            } catch (e: Exception) {
+                reportException(e)
+                LibraryResult.ofItemList(emptyList(), params)
+            }
         }
 
     override fun onGetItem(
@@ -418,9 +455,14 @@ constructor(
         mediaId: String,
     ): ListenableFuture<LibraryResult<MediaItem>> =
         scope.future(Dispatchers.IO) {
-            database.song(mediaId).first()?.toMediaItem()?.let {
-                LibraryResult.ofItem(it, null)
-            } ?: LibraryResult.ofError(SessionError.ERROR_UNKNOWN)
+            try {
+                database.song(mediaId).first()?.toMediaItem()?.let {
+                    LibraryResult.ofItem(it, null)
+                } ?: LibraryResult.ofError(SessionError.ERROR_UNKNOWN)
+            } catch (e: Exception) {
+                reportException(e)
+                LibraryResult.ofError(SessionError.ERROR_UNKNOWN)
+            }
         }
 
     override fun onSearch(
@@ -765,15 +807,19 @@ constructor(
         ).build()
 
     private fun Song.toMediaItem(path: String, isPlayable: Boolean = true, isBrowsable: Boolean = false): MediaItem {
-        val artworkBytes = song.thumbnailUrl?.let { url ->
-            val request = coil3.request.ImageRequest.Builder(context)
-                .data(url)
-                .build()
-            context.imageLoader.enqueue(request)
-
-            context.imageLoader.diskCache?.openSnapshot(url)?.use { snapshot ->
-                snapshot.data.toFile().readBytes()
+        val artworkBytes = try {
+            song.thumbnailUrl?.let { url ->
+                context.imageLoader.enqueue(
+                    coil3.request.ImageRequest.Builder(context)
+                        .data(url)
+                        .build()
+                )
+                context.imageLoader.diskCache?.openSnapshot(url)?.use { snapshot ->
+                    snapshot.data.toFile().readBytes()
+                }
             }
+        } catch (e: Exception) {
+            null
         }
 
         return MediaItem

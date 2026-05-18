@@ -179,8 +179,11 @@ import com.metrolist.music.playback.queues.EmptyQueue
 import com.metrolist.music.playback.queues.ListQueue
 import com.metrolist.music.playback.queues.Queue
 import com.metrolist.music.playback.queues.YouTubeQueue
+import com.metrolist.music.playback.queues.YouTubePlaylistQueue
 import com.metrolist.music.playback.queues.filterExplicit
 import com.metrolist.music.playback.queues.filterVideoSongs
+import com.metrolist.music.constants.LoudnessLevel
+import com.metrolist.music.constants.LoudnessLevelKey
 import com.metrolist.music.utils.CoilBitmapLoader
 import com.metrolist.music.utils.DiscordRPC
 import com.metrolist.music.utils.NetworkConnectivityObserver
@@ -192,7 +195,11 @@ import com.metrolist.music.utils.get
 import com.metrolist.music.utils.reportException
 import com.metrolist.music.widget.MetrolistWidgetManager
 import com.metrolist.music.widget.MusicWidgetReceiver
+import com.metrolist.music.widget.PlaylistWidgetReceiver
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CancellationException
+import kotlin.coroutines.coroutineContext
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -223,9 +230,8 @@ import java.io.ObjectInputStream
 import java.io.ObjectOutputStream
 import java.time.LocalDateTime
 import javax.inject.Inject
-import kotlin.coroutines.coroutineContext
 import kotlin.random.Random
-import kotlin.time.Duration.Companion.seconds
+import java.util.Collections
 
 private const val INSTANT_SILENCE_SKIP_STEP_MS = 15_000L
 private const val INSTANT_SILENCE_SKIP_SETTLE_MS = 350L
@@ -378,7 +384,20 @@ class MusicService :
     private val instantSilenceSkipEnabled = MutableStateFlow(false)
 
     private var isAudioEffectSessionOpened = false
+    private var openedAudioEffectSessionId: Int = C.AUDIO_SESSION_ID_UNSET
     private var loudnessEnhancer: LoudnessEnhancer? = null
+
+    private var loudnessSetupJob: Job? = null
+    private var loudnessSetupGeneration: Long = 0L
+
+    @Volatile
+    private var normalizationEnabledCached: Boolean = false
+
+    @Volatile
+    private var loudnessLevelCached: LoudnessLevel = LoudnessLevel.BALANCED
+
+    private var cachedNormalizationGainMb: Int? = null
+    private var cachedNormalizationEnabled: Boolean = false
 
     private var discordRpc: DiscordRPC? = null
     private var lastPlaybackSpeed = 1.0f
@@ -399,8 +418,30 @@ class MusicService :
     private var retryCount = 0
     private var silenceSkipJob: Job? = null
 
+    // Cached preferences to avoid runBlocking DataStore reads in hot paths
+    @Volatile
+    private var cachedPersistentQueue = true
+    @Volatile
+    private var cachedAutoplay = true
+    @Volatile
+    private var cachedDisableLoadMoreWhenRepeatAll = false
+    @Volatile
+    private var cachedHideExplicit = false
+    @Volatile
+    private var cachedHideVideoSongs = false
+    @Volatile
+    private var cachedShufflePlaylistFirst = false
+    @Volatile
+    private var cachedAutoLoadMore = true
+
     // URL cache for stream URLs - class-level so it can be invalidated on errors
-    private val songUrlCache = HashMap<String, Pair<String, Long>>()
+    private val songUrlCache = Collections.synchronizedMap(
+        object : LinkedHashMap<String, Pair<String, Long>>(0, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, Long>>): Boolean {
+                return size > 500
+            }
+        }
+    )
 
     // Flag to bypass cache when quality changes - forces fresh stream fetch
     private val bypassCacheForQualityChange = mutableSetOf<String>()
@@ -483,6 +524,8 @@ class MusicService :
 
         // 3. Connect the processor to the service
         // handled in createExoPlayer
+
+        seedLoudnessCacheFromPrefs()
 
         if (!ensureStartedAsForegroundOrStop()) {
             return
@@ -785,9 +828,16 @@ class MusicService :
             dataStore.data
                 .map { it[AudioNormalizationKey] ?: true }
                 .distinctUntilChanged(),
-        ) { format, normalizeAudio ->
-            format to normalizeAudio
-        }.collectLatest(scope) { (format, normalizeAudio) -> setupLoudnessEnhancer() }
+            dataStore.data
+                .map { prefs -> prefs[LoudnessLevelKey].toEnum(LoudnessLevel.BALANCED) }
+                .distinctUntilChanged(),
+        ) { format, normalizeAudio, loudnessLevel ->
+            Triple(format, normalizeAudio, loudnessLevel)
+        }.collectLatest(scope) { (format, normalizeAudio, loudnessLevel) ->
+            normalizationEnabledCached = normalizeAudio
+            loudnessLevelCached = loudnessLevel
+            setupLoudnessEnhancer()
+        }
 
         combine(
             dataStore.data.map { it[AudioOffload] ?: false },
@@ -910,6 +960,29 @@ class MusicService :
                 crossfadeGapless = gapless
             }
 
+        // Observe and cache common preferences to avoid runBlocking reads in playback callbacks
+        scope.launch {
+            dataStore.data.map { it[PersistentQueueKey] ?: true }.distinctUntilChanged().collect { cachedPersistentQueue = it }
+        }
+        scope.launch {
+            dataStore.data.map { it[AutoplayKey] ?: true }.distinctUntilChanged().collect { cachedAutoplay = it }
+        }
+        scope.launch {
+            dataStore.data.map { it[DisableLoadMoreWhenRepeatAllKey] ?: false }.distinctUntilChanged().collect { cachedDisableLoadMoreWhenRepeatAll = it }
+        }
+        scope.launch {
+            dataStore.data.map { it[HideExplicitKey] ?: false }.distinctUntilChanged().collect { cachedHideExplicit = it }
+        }
+        scope.launch {
+            dataStore.data.map { it[HideVideoSongsKey] ?: false }.distinctUntilChanged().collect { cachedHideVideoSongs = it }
+        }
+        scope.launch {
+            dataStore.data.map { it[ShufflePlaylistFirstKey] ?: false }.distinctUntilChanged().collect { cachedShufflePlaylistFirst = it }
+        }
+        scope.launch {
+            dataStore.data.map { it[AutoLoadMoreKey] ?: true }.distinctUntilChanged().collect { cachedAutoLoadMore = it }
+        }
+
         if (dataStore.get(PersistentQueueKey, true)) {
             val queueFile = filesDir.resolve(PERSISTENT_QUEUE_FILE)
             if (queueFile.exists()) {
@@ -998,7 +1071,7 @@ class MusicService :
         scope.launch {
             while (isActive) {
                 delay(15.seconds)
-                if (dataStore.get(PersistentQueueKey, true)) {
+                if (cachedPersistentQueue) {
                     saveQueueToDisk()
                 }
                 // Also save episode position periodically
@@ -1014,7 +1087,7 @@ class MusicService :
         scope.launch {
             while (isActive) {
                 delay(10.seconds)
-                if (dataStore.get(PersistentQueueKey, true) && player.isPlaying) {
+                if (cachedPersistentQueue && player.isPlaying) {
                     saveQueueToDisk()
                 }
             }
@@ -1525,8 +1598,8 @@ class MusicService :
                                 songs
                                     .filter { it.id != currentMediaId }
                                     .map { it.toMediaItem() }
-                                    .filterExplicit(dataStore.get(HideExplicitKey, false))
-                                    .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
+                                    .filterExplicit(cachedHideExplicit)
+                                    .filterVideoSongs(cachedHideVideoSongs)
 
                             if (radioItems.isNotEmpty()) {
                                 val itemCount = player.mediaItemCount
@@ -1535,11 +1608,10 @@ class MusicService :
                                 }
                                 player.addMediaItems(currentIndex + 1, radioItems)
                                 if (player.shuffleModeEnabled) {
-                                    val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
                                     applyShuffleOrder(
                                         player.currentMediaItemIndex,
                                         player.mediaItemCount,
-                                        shufflePlaylistFirst,
+                                        cachedShufflePlaylistFirst,
                                     )
                                 }
                             }
@@ -1890,6 +1962,47 @@ class MusicService :
         startRadioSeamlessly()
     }
 
+    private fun seedLoudnessCacheFromPrefs() {
+        normalizationEnabledCached = dataStore.get(AudioNormalizationKey, true)
+        loudnessLevelCached = dataStore[LoudnessLevelKey].toEnum(LoudnessLevel.BALANCED)
+
+        Timber.tag(TAG).d(
+            "Seeded loudness cache: normalization=$normalizationEnabledCached, level=$loudnessLevelCached"
+        )
+    }
+
+    private fun applyCachedLoudnessEnhancerNow() {
+        val enhancer = loudnessEnhancer ?: return
+
+        try {
+            val gain = cachedNormalizationGainMb
+
+            if (cachedNormalizationEnabled && gain != null) {
+                enhancer.setTargetGain(gain)
+                enhancer.enabled = true
+            } else {
+                enhancer.enabled = false
+            }
+        } catch (e: Exception) {
+            reportException(e)
+            releaseLoudnessEnhancer()
+        }
+    }
+
+    private fun createLoudnessEnhancerForSessionId(audioSessionId: Int): Boolean {
+        try {
+            loudnessEnhancer = LoudnessEnhancer(audioSessionId)
+            Timber.tag(TAG).d("LoudnessEnhancer created for sessionId=$audioSessionId")
+
+            return true
+        } catch (e: Exception) {
+            reportException(e)
+            loudnessEnhancer = null
+
+            return false
+        }
+    }
+
     private fun setupLoudnessEnhancer() {
         val audioSessionId = player.audioSessionId
 
@@ -1901,28 +2014,21 @@ class MusicService :
         }
 
         // Create or recreate enhancer if needed
-        if (loudnessEnhancer == null) {
-            try {
-                loudnessEnhancer = LoudnessEnhancer(audioSessionId)
-                Timber.tag(TAG).d("LoudnessEnhancer created for sessionId=$audioSessionId")
-            } catch (e: Exception) {
-                reportException(e)
-                loudnessEnhancer = null
-                return
-            }
+        if (loudnessEnhancer == null && !createLoudnessEnhancerForSessionId(audioSessionId)) {
+            return
         }
 
-        scope.launch {
+        val requestGeneration = ++loudnessSetupGeneration
+        loudnessSetupJob?.cancel()
+
+        loudnessSetupJob = scope.launch {
             try {
                 val currentMediaId =
                     withContext(Dispatchers.Main) {
                         player.currentMediaItem?.mediaId
                     }
 
-                val normalizeAudio =
-                    withContext(Dispatchers.IO) {
-                        dataStore.data.map { it[AudioNormalizationKey] ?: true }.first()
-                    }
+                val normalizeAudio = normalizationEnabledCached
 
                 if (normalizeAudio && currentMediaId != null) {
                     val format =
@@ -1930,46 +2036,64 @@ class MusicService :
                             database.format(currentMediaId).first()
                         }
 
+                    val targetLufs = loudnessLevelCached.targetLufs
+
                     Timber.tag(TAG).d("Audio normalization enabled: $normalizeAudio")
                     Timber
                         .tag(TAG)
                         .d("Format loudnessDb: ${format?.loudnessDb}, perceptualLoudnessDb: ${format?.perceptualLoudnessDb}")
 
-                    // Use loudnessDb if available, otherwise fall back to perceptualLoudnessDb
-                    val loudness = format?.loudnessDb ?: format?.perceptualLoudnessDb
+                    // Use perceptualLoudnessDb if available, otherwise fall back to loudnessDb + offset
+                    val measuredLufs: Double? = format?.perceptualLoudnessDb
+                        ?: format?.loudnessDb?.let { it + LoudnessLevel.AGGRESSIVE.targetLufs }
 
                     withContext(Dispatchers.Main) {
-                        if (loudness != null) {
-                            val loudnessDb = loudness.toFloat()
-                            val targetGain = (-loudnessDb * 100).toInt()
-                            val clampedGain = targetGain.coerceIn(MIN_GAIN_MB, MAX_GAIN_MB)
+                        if (!isActive || requestGeneration != loudnessSetupGeneration) return@withContext
+                        if (player.audioSessionId != audioSessionId || player.currentMediaItem?.mediaId != currentMediaId) return@withContext
 
-                            Timber
-                                .tag(TAG)
-                                .d("Calculated raw normalization gain: $targetGain mB (from loudness: $loudnessDb)")
+                        when {
+                            measuredLufs != null -> {
+                                val loudnessDb = measuredLufs - targetLufs
+                                val targetGain = (-loudnessDb * 100.0).toInt()
+                                val clampedGain = targetGain.coerceIn(MIN_GAIN_MB, MAX_GAIN_MB)
 
-                            try {
+                                Timber.tag(TAG)
+                                    .d("Normalization Target LUFS: $targetLufs, Measured LUFS: $measuredLufs, Calculated gain: $targetGain mB, Clamped gain: $clampedGain mB")
+
+                                Timber.tag(TAG)
+                                    .d("Calculated raw normalization gain: $targetGain mB (from loudness: $loudnessDb)")
+
+                                cachedNormalizationGainMb = clampedGain
+                                cachedNormalizationEnabled = true
                                 loudnessEnhancer?.setTargetGain(clampedGain)
                                 loudnessEnhancer?.enabled = true
-                                Timber.tag(TAG).i("LoudnessEnhancer gain applied: $clampedGain mB")
-                            } catch (e: Exception) {
-                                Timber.tag(TAG).e(e, "Failed to apply loudness enhancement")
-                                reportException(e)
-                                releaseLoudnessEnhancer()
                             }
-                        } else {
-                            loudnessEnhancer?.enabled = false
-                            Timber
-                                .tag(TAG)
-                                .w("Normalization enabled but no loudness data available - no normalization applied")
+
+                            format == null -> {
+                                // Row not available yet for new track: keep carry-over gain to avoid a jump.
+                                Timber.tag(TAG).d("Loudness row not ready yet; keeping cached normalization state")
+                            }
+
+                            else -> {
+                                cachedNormalizationGainMb = null
+                                cachedNormalizationEnabled = false
+                                loudnessEnhancer?.enabled = false
+                                Timber.tag(TAG).w("No loudness data available for track - normalization disabled")
+                            }
                         }
                     }
                 } else {
                     withContext(Dispatchers.Main) {
+                        if (!isActive || requestGeneration != loudnessSetupGeneration) return@withContext
+                        cachedNormalizationGainMb = null
+                        cachedNormalizationEnabled = false
                         loudnessEnhancer?.enabled = false
                         Timber.tag(TAG).d("setupLoudnessEnhancer: normalization disabled or mediaId unavailable")
                     }
                 }
+            } catch (e: CancellationException) {
+                Timber.tag(TAG).d("setupLoudnessEnhancer: job cancelled, likely due to new setup request or session change")
+                throw e
             } catch (e: Exception) {
                 reportException(e)
                 releaseLoudnessEnhancer()
@@ -1977,7 +2101,7 @@ class MusicService :
         }
     }
 
-    private fun releaseLoudnessEnhancer() {
+    private fun releaseLoudnessEnhancer(clearNormalizationCache: Boolean = true) {
         try {
             loudnessEnhancer?.release()
             Timber.tag(TAG).d("LoudnessEnhancer released")
@@ -1985,33 +2109,98 @@ class MusicService :
             reportException(e)
             Timber.tag(TAG).e(e, "Error releasing LoudnessEnhancer: ${e.message}")
         } finally {
+            if (clearNormalizationCache) {
+                cachedNormalizationGainMb = null
+                cachedNormalizationEnabled = false
+            }
             loudnessEnhancer = null
         }
     }
 
     private fun openAudioEffectSession() {
-        if (isAudioEffectSessionOpened) return
+        val audioSessionId = player.audioSessionId
+        if (audioSessionId == C.AUDIO_SESSION_ID_UNSET || audioSessionId <= 0) {
+            Timber.tag(TAG).w("openAudioEffectSession: invalid audioSessionId=$audioSessionId")
+            return
+        }
+
+        if (isAudioEffectSessionOpened &&
+            openedAudioEffectSessionId == audioSessionId &&
+            loudnessEnhancer != null
+        ) {
+            applyCachedLoudnessEnhancerNow()
+
+            if (!cachedNormalizationEnabled || cachedNormalizationGainMb == null) {
+                setupLoudnessEnhancer()
+            }
+
+            return
+        }
+
+        if (isAudioEffectSessionOpened && openedAudioEffectSessionId > 0) {
+            closeAudioEffectSession(sessionIdOverride = openedAudioEffectSessionId, clearNormalizationCache = false)
+        } else {
+            releaseLoudnessEnhancer(clearNormalizationCache = false)
+        }
+
+        val enhancerReady = loudnessEnhancer != null || createLoudnessEnhancerForSessionId(audioSessionId)
+
+        if (!enhancerReady) {
+            isAudioEffectSessionOpened = false
+            openedAudioEffectSessionId = C.AUDIO_SESSION_ID_UNSET
+            Timber.tag(TAG).w("openAudioEffectSession: failed to create LoudnessEnhancer for sessionId=$audioSessionId, audio effects will be unavailable")
+            return
+        }
+
         isAudioEffectSessionOpened = true
-        setupLoudnessEnhancer()
+        openedAudioEffectSessionId = audioSessionId
+
+        applyCachedLoudnessEnhancerNow()
+
+        if (!cachedNormalizationEnabled || cachedNormalizationGainMb == null) {
+            setupLoudnessEnhancer()
+        }
+
         sendBroadcast(
             Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
-                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, player.audioSessionId)
+                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, audioSessionId)
                 putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
                 putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
             },
         )
     }
 
-    private fun closeAudioEffectSession() {
-        if (!isAudioEffectSessionOpened) return
-        isAudioEffectSessionOpened = false
-        releaseLoudnessEnhancer()
-        sendBroadcast(
-            Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION).apply {
-                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, player.audioSessionId)
-                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
-            },
-        )
+    private fun closeAudioEffectSession(sessionIdOverride: Int? = null, clearNormalizationCache: Boolean = true) {
+        val sessionIdToClose = sessionIdOverride ?: openedAudioEffectSessionId
+
+        loudnessSetupGeneration++
+        loudnessSetupJob?.cancel()
+        loudnessSetupJob = null
+
+        // Guard: only release/reset state if closing the currently active session
+        val isClosingCurrentSession =
+            isAudioEffectSessionOpened &&
+                    openedAudioEffectSessionId != C.AUDIO_SESSION_ID_UNSET &&
+                    sessionIdToClose == openedAudioEffectSessionId
+
+        if (isClosingCurrentSession) {
+            if (loudnessEnhancer != null) {
+                releaseLoudnessEnhancer(clearNormalizationCache = clearNormalizationCache)
+            }
+
+            isAudioEffectSessionOpened = false
+            openedAudioEffectSessionId = C.AUDIO_SESSION_ID_UNSET
+        }
+
+        // Broadcast close for the requested session (even if stale)
+        if (sessionIdToClose != C.AUDIO_SESSION_ID_UNSET && sessionIdToClose > 0) {
+            sendBroadcast(
+                Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                    putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionIdToClose)
+                    putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+                },
+            )
+        }
     }
 
     private var previousMediaItemIndex = C.INDEX_UNSET
@@ -2078,8 +2267,7 @@ class MusicService :
 
         // Force Repeat One if the player ignored it and auto-advanced
         if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
-            val repeatMode = runBlocking { dataStore.get(RepeatModeKey, REPEAT_MODE_OFF) }
-            if (repeatMode == REPEAT_MODE_ONE &&
+            if (player.repeatMode == REPEAT_MODE_ONE &&
                 previousMediaItemIndex != C.INDEX_UNSET &&
                 previousMediaItemIndex != player.currentMediaItemIndex
             ) {
@@ -2118,32 +2306,31 @@ class MusicService :
         }
 
         // Auto load more songs from queue
-        if (dataStore.get(AutoLoadMoreKey, true) &&
+        if (cachedAutoLoadMore &&
             reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
             player.mediaItemCount - player.currentMediaItemIndex <= 5 &&
             currentQueue.hasNextPage() &&
-            !(dataStore.get(DisableLoadMoreWhenRepeatAllKey, false) && player.repeatMode == REPEAT_MODE_ALL)
+            !(cachedDisableLoadMoreWhenRepeatAll && player.repeatMode == REPEAT_MODE_ALL)
         ) {
             scope.launch(SilentHandler) {
                 val mediaItems =
                     withContext(Dispatchers.IO) {
                         currentQueue
                             .nextPage()
-                            .filterExplicit(dataStore.get(HideExplicitKey, false))
-                            .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
+                            .filterExplicit(cachedHideExplicit)
+                            .filterVideoSongs(cachedHideVideoSongs)
                     }
                 if (player.playbackState != STATE_IDLE && mediaItems.isNotEmpty()) {
                     player.addMediaItems(mediaItems)
                     if (player.shuffleModeEnabled) {
-                        val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
-                        applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, shufflePlaylistFirst)
+                        applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, cachedShufflePlaylistFirst)
                     }
                 }
             }
         }
 
         // Save state when media item changes
-        if (dataStore.get(PersistentQueueKey, true)) {
+        if (cachedPersistentQueue) {
             saveQueueToDisk()
         }
     }
@@ -2158,7 +2345,7 @@ class MusicService :
                 return
             }
 
-            val repeatMode = runBlocking { dataStore.get(RepeatModeKey, REPEAT_MODE_OFF) }
+            val repeatMode = player.repeatMode
 
             // Handle Repeat All mode
             if (repeatMode == REPEAT_MODE_ALL && player.mediaItemCount > 0) {
@@ -2177,8 +2364,7 @@ class MusicService :
             }
 
             // Handle autoplay - check if there's a next item to play
-            val autoplay = runBlocking { dataStore.get(AutoplayKey, true) }
-            if (autoplay && player.hasNextMediaItem()) {
+            if (cachedAutoplay && player.hasNextMediaItem()) {
                 player.seekToNextMediaItem()
                 player.prepare()
                 if (castConnectionHandler?.isCasting?.value != true) {
@@ -2188,7 +2374,7 @@ class MusicService :
         }
 
         // Save state when playback state changes (but not during silence skipping)
-        if (dataStore.get(PersistentQueueKey, true) && !isSilenceSkipping) {
+        if (cachedPersistentQueue && !isSilenceSkipping) {
             saveQueueToDisk()
         }
 
@@ -2241,7 +2427,7 @@ class MusicService :
         }
 
         if (playWhenReady) {
-            setupLoudnessEnhancer()
+            applyCachedLoudnessEnhancerNow()
         }
     }
 
@@ -2262,7 +2448,7 @@ class MusicService :
                 if (focusGranted) {
                     openAudioEffectSession()
                 }
-            } else {
+            } else if (player.playbackState == Player.STATE_IDLE) {
                 closeAudioEffectSession()
             }
         }
@@ -2336,7 +2522,7 @@ class MusicService :
         }
 
         // Save state when shuffle mode changes
-        if (dataStore.get(PersistentQueueKey, true)) {
+        if (cachedPersistentQueue) {
             saveQueueToDisk()
         }
     }
@@ -2350,7 +2536,7 @@ class MusicService :
         }
 
         // Save state when repeat mode changes
-        if (dataStore.get(PersistentQueueKey, true)) {
+        if (cachedPersistentQueue) {
             saveQueueToDisk()
         }
     }
@@ -2956,24 +3142,6 @@ class MusicService :
                                                 .header("Proxy-Authorization", auth)
                                                 .build()
                                         } ?: response.request
-                                    }.addInterceptor { chain ->
-                                        var request = chain.request()
-                                        if (request.url.queryParameter(PRIVATE_STREAM_MARKER) != null) {
-                                            val cleanUrl =
-                                                request.url
-                                                    .newBuilder()
-                                                    .removeAllQueryParameters(PRIVATE_STREAM_MARKER)
-                                                    .build()
-                                            val builder = request.newBuilder().url(cleanUrl)
-                                            val host = cleanUrl.host
-                                            if (host == "youtube.com" || host.endsWith(".youtube.com") ||
-                                                host.endsWith(".googlevideo.com")
-                                            ) {
-                                                YouTube.cookie?.let { builder.header("Cookie", it) }
-                                            }
-                                            request = builder.build()
-                                        }
-                                        chain.proceed(request)
                                     }.build(),
                             ),
                         ),
@@ -3103,12 +3271,10 @@ class MusicService :
             }
 
             Timber.tag("MusicService").i("FETCHING STREAM: $mediaId | quality=$audioQuality")
-            val isUploaded = database.getSongByIdBlocking(mediaId)?.song?.isUploaded == true
             val playbackData =
                 runBlocking(Dispatchers.IO) {
                     YTPlayerUtils.playerResponseForPlayback(
                         mediaId,
-                        isUploadedHint = isUploaded,
                         audioQuality = audioQuality,
                         connectivityManager = connectivityManager,
                     )
@@ -3185,19 +3351,9 @@ class MusicService :
 
                 val streamUrl = nonNullPlayback.streamUrl
 
-                // For privately-owned tracks, mark the URL so the interceptor attaches auth cookies
-                val finalUrl =
-                    if (nonNullPlayback.isPrivatelyOwned) {
-                        val sep = if ("?" in streamUrl) "&" else "?"
-                        "${streamUrl}${sep}${PRIVATE_STREAM_MARKER}=1"
-                    } else {
-                        streamUrl
-                    }
-
                 songUrlCache[mediaId] =
-                    finalUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
-
-                return@Factory dataSpec.withUri(finalUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
+                    streamUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
+                return@Factory dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
             }
         }
     }
@@ -3483,7 +3639,7 @@ class MusicService :
         discordRpc = null
         connectivityObserver.unregister()
         abandonAudioFocus()
-        releaseLoudnessEnhancer()
+        closeAudioEffectSession()
         mediaLibrarySessionCallback.release()
         mediaSession.release()
         player.removeListener(this)
@@ -3595,12 +3751,124 @@ class MusicService :
                 updateWidgetUI(player.isPlaying)
             }
 
-            MusicWidgetReceiver.ACTION_UPDATE_WIDGET -> {
+            MusicWidgetReceiver.ACTION_UPDATE_WIDGET,
+            PlaylistWidgetReceiver.ACTION_UPDATE_WIDGET -> {
                 updateWidgetUI(player.isPlaying)
+            }
+
+            PlaylistWidgetReceiver.ACTION_PLAY_TARGET -> {
+                handlePlaylistWidgetPlay(intent)
             }
         }
 
         return super.onStartCommand(intent, flags, startId)
+    }
+
+
+    private fun handlePlaylistWidgetPlay(intent: Intent) {
+        scope.launch {
+            try {
+                val queue = withContext(Dispatchers.IO) {
+                    buildPlaylistWidgetQueue(intent)
+                }
+                // Fall back to opening the target in app when it cannot be played directly
+                if (queue == null) {
+                    openPlaylistWidgetTarget(intent)
+                    return@launch
+                }
+                playQueue(queue, playWhenReady = true)
+                updateWidgetUI(true)
+            } catch (t: Throwable) {
+                Timber.tag(TAG).e(t, "Failed to start playlist widget target")
+                openPlaylistWidgetTarget(intent)
+            }
+        }
+    }
+
+    private fun openPlaylistWidgetTarget(source: Intent) {
+        val activityIntent = Intent(this, MainActivity::class.java).apply {
+            action = MainActivity.ACTION_OPEN_WIDGET_TARGET
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(
+                MainActivity.EXTRA_WIDGET_TARGET_TYPE,
+                source.getStringExtra(PlaylistWidgetReceiver.EXTRA_TARGET_TYPE),
+            )
+            putExtra(
+                MainActivity.EXTRA_WIDGET_TARGET_ID,
+                source.getStringExtra(PlaylistWidgetReceiver.EXTRA_TARGET_ID),
+            )
+        }
+        try {
+            startActivity(activityIntent)
+        } catch (t: Throwable) {
+            Timber.tag(TAG).e(t, "Failed to open playlist widget target")
+        }
+    }
+
+    private suspend fun buildPlaylistWidgetQueue(intent: Intent): Queue? {
+        val targetType = intent.getStringExtra(PlaylistWidgetReceiver.EXTRA_TARGET_TYPE) ?: return null
+        val targetId = intent.getStringExtra(PlaylistWidgetReceiver.EXTRA_TARGET_ID).orEmpty()
+        val targetTitle = intent.getStringExtra(PlaylistWidgetReceiver.EXTRA_TARGET_TITLE)
+
+        return when (targetType) {
+            PlaylistWidgetReceiver.TARGET_TYPE_LOCAL -> {
+                if (targetId.isBlank()) return null
+                val songs = database.playlistSongs(targetId).first()
+                if (songs.isEmpty()) return null
+                val playlistName = database.playlist(targetId).first()?.playlist?.name ?: targetTitle
+                ListQueue(
+                    title = playlistName,
+                    items = songs.map { it.song.toMediaItem() },
+                )
+            }
+
+            PlaylistWidgetReceiver.TARGET_TYPE_ONLINE -> {
+                if (targetId.isBlank()) return null
+                val cachedPlaylist = database.playlistByBrowseId(targetId).first()
+                val cachedSongs = cachedPlaylist?.let { database.playlistSongs(it.playlist.id).first() }.orEmpty()
+                if (cachedSongs.isNotEmpty()) {
+                    ListQueue(
+                        title = cachedPlaylist?.playlist?.name ?: targetTitle,
+                        items = cachedSongs.map { it.song.toMediaItem() },
+                    )
+                } else {
+                    YouTubePlaylistQueue(
+                        playlistId = targetId,
+                        playlistTitle = targetTitle,
+                    )
+                }
+            }
+
+            PlaylistWidgetReceiver.TARGET_TYPE_LIKED -> {
+                val songs = database.likedSongsByCreateDateAsc().first()
+                if (songs.isEmpty()) return null
+                ListQueue(
+                    title = getString(R.string.liked_songs),
+                    items = songs.map { it.toMediaItem() },
+                )
+            }
+
+            PlaylistWidgetReceiver.TARGET_TYPE_DOWNLOADED -> {
+                val songs = database.downloadedSongsByCreateDateAsc().first()
+                if (songs.isEmpty()) return null
+                ListQueue(
+                    title = getString(R.string.downloaded_songs),
+                    items = songs.map { it.toMediaItem() },
+                )
+            }
+
+            PlaylistWidgetReceiver.TARGET_TYPE_TOP -> {
+                val limit = targetId.toIntOrNull() ?: 50
+                val songs = database.mostPlayedSongs(0L, limit = limit).first()
+                if (songs.isEmpty()) return null
+                ListQueue(
+                    title = getString(R.string.my_top),
+                    items = songs.map { it.toMediaItem() },
+                )
+            }
+
+            else -> null
+        }
     }
 
     private fun handleAlarmTrigger(intent: Intent) {
@@ -3957,6 +4225,10 @@ class MusicService :
             timber.log.Timber.e(e, "Failed to swap player in MediaSession")
         }
 
+        val previousAudioSessionId = fadingPlayer?.audioSessionId ?: C.AUDIO_SESSION_ID_UNSET
+
+        openAudioEffectSession()
+
         crossfadeJob =
             scope.launch {
                 val duration = crossfadeDuration.toLong()
@@ -3993,13 +4265,14 @@ class MusicService :
                 try {
                     fadingPlayer?.volume = 0f
                     player.volume = startVolume
-                    cleanupCrossfade()
                 } catch (e: Exception) {
                 }
+
+                cleanupCrossfade(fadingPlayerSessionId = previousAudioSessionId)
             }
     }
 
-    private fun cleanupCrossfade() {
+    private fun cleanupCrossfade(fadingPlayerSessionId: Int = C.AUDIO_SESSION_ID_UNSET) {
         fadingPlayer?.stop()
         fadingPlayer?.clearMediaItems()
         fadingPlayer?.release()
@@ -4007,6 +4280,10 @@ class MusicService :
         isCrossfading = false
         applyEffectiveVolume()
         sleepTimer.notifySongTransition()
+
+        if (fadingPlayerSessionId != C.AUDIO_SESSION_ID_UNSET && fadingPlayerSessionId > 0) {
+            closeAudioEffectSession(sessionIdOverride = fadingPlayerSessionId, clearNormalizationCache = true)
+        }
     }
 
     companion object {
@@ -4039,7 +4316,6 @@ class MusicService :
         private const val MIN_GAIN_MB = -1500 // Minimum gain in millibels (-15 dB)
 
         private const val TAG = "MusicService"
-        private const val PRIVATE_STREAM_MARKER = "_metrolist_private"
 
         @Volatile
         var isRunning = false

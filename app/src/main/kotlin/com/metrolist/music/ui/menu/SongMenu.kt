@@ -568,6 +568,7 @@ fun SongMenu(
                         ),
                     ),
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 16.dp),
+                columns = if (isGuest) 2 else 3,
             )
         }
         item {
@@ -670,9 +671,12 @@ fun SongMenu(
                                                     id = song.id,
                                                     title = song.song.title,
                                                     subtitle = song.artists.joinToString(", ") { it.name },
+                                                    subtitleIds = song.artists.joinToString(", ") { it.id },
                                                     thumbnailUrl = song.song.thumbnailUrl,
                                                     type = "SONG",
                                                     explicit = song.song.explicit,
+                                                    albumId = song.album?.id,
+                                                    albumName = song.album?.title
                                                 ),
                                             )
                                         }
@@ -813,7 +817,7 @@ fun SongMenu(
                                         )
                                     },
                                     onClick = {
-                                        playlistSong?.let { ps ->
+                                        playlistSong.let { ps ->
                                             val capturedSetVideoId = ps.map.setVideoId
                                             database.transaction {
                                                 move(

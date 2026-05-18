@@ -6,6 +6,7 @@
 package com.metrolist.music.ui.screens.playlist
 
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -243,7 +244,7 @@ fun AutoPlaylistScreen(
                         val takeFlags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
                         context.contentResolver.takePersistableUriPermission(uri, takeFlags)
                     } catch (e: SecurityException) {
-                        android.util.Log.w("AutoPlaylistScreen", "Could not take persistable permission: ${e.message}")
+                        Timber.w(e, "Could not take persistable permission")
                     }
                 }
                 uploadJob =
@@ -258,7 +259,19 @@ fun AutoPlaylistScreen(
                             uploadProgress = 0f
 
                             try {
-                                val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "unknown"
+                                // Get actual display name from content resolver
+                                var fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "unknown"
+                                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                                    if (cursor.moveToFirst()) {
+                                        val displayNameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                                        if (displayNameIndex >= 0) {
+                                            val name = cursor.getString(displayNameIndex)
+                                            if (!name.isNullOrBlank()) {
+                                                fileName = name
+                                            }
+                                        }
+                                    }
+                                }
                                 currentFileName = fileName
                                 val extension = fileName.substringAfterLast('.', "").lowercase()
 
@@ -899,7 +912,7 @@ private fun AutoPlaylistHeader(
         // Playlist Name
         Text(
             text = name,
-            style = MaterialTheme.typography.headlineSmall,
+            style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Bold,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             maxLines = 2,

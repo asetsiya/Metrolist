@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import com.metrolist.innertube.YouTube
 import com.metrolist.innertube.models.AlbumItem
 import com.metrolist.innertube.models.Artist
+import com.metrolist.innertube.models.ArtistItem
 import com.metrolist.innertube.models.PlaylistItem
 import com.metrolist.innertube.models.SongItem
 import kotlinx.coroutines.flow.combine
@@ -58,6 +59,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import timber.log.Timber
 import java.time.LocalDate
 import javax.inject.Inject
 import kotlin.random.Random
@@ -145,6 +147,13 @@ class HomeViewModel @Inject constructor(
                                 year = item.album.year,
                                 thumbnail = item.thumbnailUrl ?: ""
                             )
+                            is com.metrolist.music.db.entities.Artist -> ArtistItem(
+                                id = item.id,
+                                title = item.title,
+                                thumbnail = item.thumbnailUrl,
+                                shuffleEndpoint = null,
+                                radioEndpoint = null
+                            )
                             else -> null
                         }
                     }
@@ -212,6 +221,13 @@ class HomeViewModel @Inject constructor(
                             artists = item.artists.map { Artist(name = it.name, id = it.id) },
                             year = item.album.year,
                             thumbnail = item.thumbnailUrl ?: ""
+                        ))
+                        is com.metrolist.music.db.entities.Artist -> otherSources.add(ArtistItem(
+                            id = item.id,
+                            title = item.title,
+                            thumbnail = item.thumbnailUrl,
+                            shuffleEndpoint = null,
+                            radioEndpoint = null
                         ))
                         else -> {}
                     }
@@ -688,17 +704,12 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    override fun onCleared() {
+        super.onCleared()
+        wrappedManager.dispose()
+    }
+
     init {
-        // Load home data
-        viewModelScope.launch(Dispatchers.IO) {
-            context.dataStore.data
-                .map { it[InnerTubeCookieKey] }
-                .distinctUntilChanged()
-                .first()
-
-            load()
-        }
-
         // Run sync in separate coroutine with cooldown to avoid blocking UI
         viewModelScope.launch(Dispatchers.IO) {
             syncUtils.tryAutoSync()
@@ -728,20 +739,15 @@ class HomeViewModel @Inject constructor(
             context.dataStore.data
                 .map { it[InnerTubeCookieKey] }
                 .collect { cookie ->
-                    // Avoid processing if already processing
                     if (isProcessingAccountData) return@collect
 
-                    // Always process cookie changes, even if same value (for logout/login scenarios)
                     lastProcessedCookie = cookie
                     isProcessingAccountData = true
 
                     try {
                         if (cookie != null && cookie.isNotEmpty()) {
-
-                            // Update YouTube.cookie manually to ensure it's set
                             YouTube.cookie = cookie
 
-                            // Fetch new account data
                             YouTube.accountInfo().onSuccess { info ->
                                 accountName.value = info.name
                                 accountImageUrl.value = info.thumbnailUrl
@@ -769,6 +775,30 @@ class HomeViewModel @Inject constructor(
                         loadAccountPlaylists()
                     }
                 }
+        }
+    }
+
+    private var isHomeDataLoaded = false
+
+    fun loadHomeData() {
+        if (isHomeDataLoaded) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val cookie = context.dataStore.data
+                    .map { it[InnerTubeCookieKey] }
+                    .distinctUntilChanged()
+                    .first()
+
+                if (!cookie.isNullOrEmpty()) {
+                    YouTube.cookie = cookie
+                }
+
+                isHomeDataLoaded = true
+                load()
+            } catch (e: Exception) {
+                isHomeDataLoaded = false
+                Timber.e(e, "Failed to load home data")
+            }
         }
     }
 }
