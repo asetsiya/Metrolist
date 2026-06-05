@@ -24,7 +24,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.guava.future
 import timber.log.Timber
-import java.io.ByteArrayOutputStream
 
 class CoilBitmapLoader(
     private val context: Context,
@@ -37,11 +36,12 @@ class CoilBitmapLoader(
     private fun Bitmap.createIndependentCopy(): Bitmap {
         if (isRecycled) return createFallbackBitmap()
         return try {
-            val stream = ByteArrayOutputStream()
-            compress(Bitmap.CompressFormat.PNG, 100, stream)
-            val bytes = stream.toByteArray()
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: createFallbackBitmap()
+            val copy = createBitmap(width, height)
+            val canvas = android.graphics.Canvas(copy)
+            canvas.drawBitmap(this, 0f, 0f, null)
+            copy
         } catch (e: Exception) {
+            Timber.tag("CoilBitmapLoader").w(e, "Failed to create independent copy")
             createFallbackBitmap()
         }
     }

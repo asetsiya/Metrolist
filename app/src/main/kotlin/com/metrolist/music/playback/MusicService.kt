@@ -24,7 +24,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.audiofx.AudioEffect
-import android.media.audiofx.LoudnessEnhancer
+import com.metrolist.music.playback.audio.VolumeNormalizationAudioProcessor
 import android.net.ConnectivityManager
 import android.os.Binder
 import android.os.Build
@@ -73,6 +73,7 @@ import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder
 import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.mkv.MatroskaExtractor
 import androidx.media3.extractor.mp4.FragmentedMp4Extractor
+import androidx.media3.extractor.mp4.Mp4Extractor
 import androidx.media3.session.CommandButton
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaController
@@ -93,6 +94,7 @@ import com.metrolist.music.constants.AndroidAutoTargetPlaylistKey
 import com.metrolist.music.constants.AudioNormalizationKey
 import com.metrolist.music.constants.AudioOffload
 import com.metrolist.music.constants.AudioQualityKey
+import com.metrolist.music.constants.AudioTrackPlaybackParamsKey
 import com.metrolist.music.constants.AutoDownloadOnLikeKey
 import com.metrolist.music.constants.AutoLoadMoreKey
 import com.metrolist.music.constants.AutoSkipNextOnErrorKey
@@ -104,15 +106,21 @@ import com.metrolist.music.constants.DisableLoadMoreWhenRepeatAllKey
 import com.metrolist.music.constants.DiscordActivityNameKey
 import com.metrolist.music.constants.DiscordActivityTypeKey
 import com.metrolist.music.constants.DiscordAdvancedModeKey
-import com.metrolist.music.constants.DiscordAvatarKey
-import com.metrolist.music.constants.DiscordButton1TextKey
-import com.metrolist.music.constants.DiscordButton1VisibleKey
-import com.metrolist.music.constants.DiscordButton2TextKey
-import com.metrolist.music.constants.DiscordButton2VisibleKey
-import com.metrolist.music.constants.DiscordStatusKey
-import com.metrolist.music.constants.DiscordTokenKey
-import com.metrolist.music.constants.DiscordUseDetailsKey
+import com.metrolist.music.constants.DiscordButton1EnabledKey
+import com.metrolist.music.constants.DiscordButton1LabelKey
+import com.metrolist.music.constants.DiscordButton1UrlKey
+import com.metrolist.music.constants.DiscordButton2EnabledKey
+import com.metrolist.music.constants.DiscordButton2LabelKey
+import com.metrolist.music.constants.DiscordButton2UrlKey
+import com.metrolist.music.constants.DiscordDetailsTemplateKey
+import com.metrolist.music.constants.DiscordStateTemplateKey
+import com.metrolist.music.constants.DiscordUserStatusKey
 import com.metrolist.music.constants.EnableDiscordRPCKey
+import com.metrolist.music.discord.DiscordActivity
+import com.metrolist.music.discord.DiscordDefaults
+import com.metrolist.music.discord.DiscordRpcManager
+import com.metrolist.music.discord.DiscordActivityBuilder
+import com.metrolist.music.discord.DiscordTemplateRenderer
 import com.metrolist.music.constants.EnableLastFMScrobblingKey
 import com.metrolist.music.constants.EnableSongCacheKey
 import com.metrolist.music.constants.HideExplicitKey
@@ -185,10 +193,11 @@ import com.metrolist.music.playback.queues.filterVideoSongs
 import com.metrolist.music.constants.LoudnessLevel
 import com.metrolist.music.constants.LoudnessLevelKey
 import com.metrolist.music.utils.CoilBitmapLoader
-import com.metrolist.music.utils.DiscordRPC
 import com.metrolist.music.utils.NetworkConnectivityObserver
 import com.metrolist.music.utils.ScrobbleManager
 import com.metrolist.music.utils.SyncUtils
+import com.metrolist.music.utils.getArtistSeparator
+import com.metrolist.music.utils.joinToArtistString
 import com.metrolist.music.utils.YTPlayerUtils
 import com.metrolist.music.utils.dataStore
 import com.metrolist.music.utils.get
@@ -196,6 +205,7 @@ import com.metrolist.music.utils.reportException
 import com.metrolist.music.widget.MetrolistWidgetManager
 import com.metrolist.music.widget.MusicWidgetReceiver
 import com.metrolist.music.widget.PlaylistWidgetReceiver
+import com.metrolist.music.ui.utils.resize
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CancellationException
 import kotlin.coroutines.coroutineContext
@@ -368,8 +378,8 @@ class MusicService :
     private var fadingPlayer: ExoPlayer? = null
     private var isCrossfading = false
     private var crossfadeJob: Job? = null
-
-    private lateinit var mediaSession: MediaLibrarySession
+    private var isRunning = false
+    private var mediaSession: MediaLibrarySession? = null
 
     // Tracks if player has been properly initilized
     private val playerInitialized = MutableStateFlow(false)
@@ -385,7 +395,7 @@ class MusicService :
 
     private var isAudioEffectSessionOpened = false
     private var openedAudioEffectSessionId: Int = C.AUDIO_SESSION_ID_UNSET
-    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private val volumeNormalizationProcessor = VolumeNormalizationAudioProcessor()
 
     private var loudnessSetupJob: Job? = null
     private var loudnessSetupGeneration: Long = 0L
@@ -399,9 +409,17 @@ class MusicService :
     private var cachedNormalizationGainMb: Int? = null
     private var cachedNormalizationEnabled: Boolean = false
 
-    private var discordRpc: DiscordRPC? = null
+    @Volatile private var discordRpcEnabled = false
+    private val screenOffHandler = Handler(Looper.getMainLooper())
+    private val screenOffTimeout = Runnable {
+        Timber.tag("DiscordSvc").i("screenOffTimeout: isPlaying=%s, isReady=%s",
+            player.isPlaying, DiscordRpcManager.isReady())
+        if (!player.isPlaying && DiscordRpcManager.isReady()) {
+            Timber.tag("DiscordSvc").i("screenOffTimeout: disconnecting")
+            DiscordRpcManager.disconnect()
+        }
+    }
     private var lastPlaybackSpeed = 1.0f
-    private var discordUpdateJob: kotlinx.coroutines.Job? = null
 
     @Volatile
     private var latestMediaNotification: Notification? = null
@@ -443,6 +461,21 @@ class MusicService :
         }
     )
 
+    private val sessionKey
+        get() = YouTube.dataSyncId.takeIf { !it.isNullOrBlank() }
+            ?: YouTube.visitorData.takeIf { !it.isNullOrBlank() }
+            ?: ""
+
+    private fun cacheKey(mediaId: String) = "${sessionKey}:$mediaId"
+
+    private val playbackUrlCache = Collections.synchronizedMap(
+        object : LinkedHashMap<String, String>(0, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>): Boolean {
+                return size > 500
+            }
+        }
+    )
+
     // Flag to bypass cache when quality changes - forces fresh stream fetch
     private val bypassCacheForQualityChange = mutableSetOf<String>()
 
@@ -467,17 +500,17 @@ class MusicService :
             ) {
                 when (intent.action) {
                     Intent.ACTION_SCREEN_OFF -> {
-                        if (!player.isPlaying) {
-                            scope.launch(Dispatchers.IO) {
-                                discordRpc?.closeRPC()
-                            }
-                        }
+                        Timber.tag("DiscordSvc").i("SCREEN_OFF: delaying disconnect 60s")
+                        screenOffHandler.postDelayed(screenOffTimeout, 60_000)
                     }
 
                     Intent.ACTION_SCREEN_ON -> {
-                        if (player.isPlaying) {
-                            scope.launch {
-                                currentSong.value?.let { song ->
+                        Timber.tag("DiscordSvc").i("SCREEN_ON: removing disconnect delay")
+                        screenOffHandler.removeCallbacks(screenOffTimeout)
+                        if (player.isPlaying && DiscordRpcManager.isReady()) {
+                            currentSong.value?.let { song ->
+                                Timber.tag("DiscordSvc").i("SCREEN_ON: updating RPC")
+                                scope.launch(Dispatchers.IO) {
                                     updateDiscordRPC(song)
                                 }
                             }
@@ -642,7 +675,10 @@ class MusicService :
 
         audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
 
-        audioQuality = dataStore.get(AudioQualityKey).toEnum(com.metrolist.music.constants.AudioQuality.AUTO)
+        audioQuality = dataStore.get(AudioQualityKey)?.let { value ->
+            if (value == "VERY_HIGH") com.metrolist.music.constants.AudioQuality.HIGH
+            else com.metrolist.music.constants.AudioQuality.entries.find { it.name == value }
+        } ?: com.metrolist.music.constants.AudioQuality.AUTO
         playerVolume = MutableStateFlow(dataStore.get(PlayerVolumeKey, 1f).coerceIn(0f, 1f))
 
         // Initialize Google Cast
@@ -678,8 +714,8 @@ class MusicService :
                 if (isConnected && waitingForNetworkConnection.value) {
                     triggerRetry()
                 }
-                // Update Discord RPC when network becomes available
-                if (isConnected && discordRpc != null && player.isPlaying) {
+                if (isConnected && DiscordRpcManager.isReady() && player.isPlaying) {
+                    Timber.tag("DiscordSvc").i("Network reconnected, updating RPC")
                     val mediaId = player.currentMetadata?.id
                     if (mediaId != null) {
                         database.song(mediaId).first()?.let { song ->
@@ -696,8 +732,8 @@ class MusicService :
             dataStore.data
                 .map {
                     it[AudioQualityKey]?.let { value ->
-                        com.metrolist.music.constants.AudioQuality.entries
-                            .find { it.name == value }
+                        if (value == "VERY_HIGH") com.metrolist.music.constants.AudioQuality.HIGH
+                        else com.metrolist.music.constants.AudioQuality.entries.find { it.name == value }
                     } ?: com.metrolist.music.constants.AudioQuality.AUTO
                 }.distinctUntilChanged()
                 .collect { newQuality ->
@@ -707,11 +743,11 @@ class MusicService :
                     // Skip reload on first emit (app startup)
                     if (isFirstQualityEmit) {
                         isFirstQualityEmit = false
-                        Timber.tag("MusicService").i("QUALITY INIT: $newQuality")
+                        Timber.tag(TAG).i("QUALITY INIT: $newQuality")
                         return@collect
                     }
 
-                    Timber.tag("MusicService").i("QUALITY CHANGED: $oldQuality -> $newQuality")
+                    Timber.tag(TAG).i("QUALITY CHANGED: $oldQuality -> $newQuality")
 
                     // Reload current song with new quality
                     val mediaId = player.currentMediaItem?.mediaId ?: return@collect
@@ -719,7 +755,7 @@ class MusicService :
                     val wasPlaying = player.isPlaying
                     val currentIndex = player.currentMediaItemIndex
 
-                    Timber.tag("MusicService").i("RELOADING STREAM: $mediaId at position ${currentPosition}ms")
+                    Timber.tag(TAG).i("RELOADING STREAM: $mediaId at position ${currentPosition}ms")
 
                     // Clear cached URL to force fresh fetch
                     songUrlCache.remove(mediaId)
@@ -729,15 +765,15 @@ class MusicService :
                         try {
                             playerCache.removeResource(mediaId)
                             downloadCache.removeResource(mediaId)
-                            Timber.tag("MusicService").d("Cleared player and download cache for $mediaId")
+                            Timber.tag(TAG).d("Cleared player and download cache for $mediaId")
                         } catch (e: Exception) {
-                            Timber.tag("MusicService").e(e, "Failed to clear cache for $mediaId")
+                            Timber.tag(TAG).e(e, "Failed to clear cache for $mediaId")
                         }
                     }
 
                     // Set bypass flag so resolver skips cache checks
                     bypassCacheForQualityChange.add(mediaId)
-                    Timber.tag("MusicService").d("Set bypass cache flag for $mediaId")
+                    Timber.tag(TAG).d("Set bypass cache flag for $mediaId")
 
                     // Reload player at same position
                     player.stop()
@@ -836,7 +872,7 @@ class MusicService :
         }.collectLatest(scope) { (format, normalizeAudio, loudnessLevel) ->
             normalizationEnabledCached = normalizeAudio
             loudnessLevelCached = loudnessLevel
-            setupLoudnessEnhancer()
+            setupAudioNormalization()
         }
 
         combine(
@@ -851,48 +887,147 @@ class MusicService :
                 secondaryPlayer?.setOffloadEnabled(useOffload)
             }
 
+        var isFirstAudioTrackParamsEmit = true
         dataStore.data
-            .map { it[DiscordTokenKey] to (it[EnableDiscordRPCKey] ?: true) }
+            .map { it[AudioTrackPlaybackParamsKey] ?: true }
+            .distinctUntilChanged()
+            .collectLatest(scope) { useAudioTrackParams ->
+                if (isFirstAudioTrackParamsEmit) {
+                    isFirstAudioTrackParamsEmit = false
+                    return@collectLatest
+                }
+
+                Timber.tag("MusicService").i("AudioTrackPlaybackParams changed to: $useAudioTrackParams")
+
+                val currentIndex = player.currentMediaItemIndex
+                val currentPosition = player.currentPosition
+                val playWhenReady = player.playWhenReady
+                val repeatMode = player.repeatMode
+                val shuffleModeEnabled = player.shuffleModeEnabled
+                val playbackParameters = player.playbackParameters
+                val volume = player.volume
+                val mediaItems = List(player.mediaItemCount) { index ->
+                    player.getMediaItemAt(index)
+                }
+
+                player.removeListener(this)
+                player.removeListener(sleepTimer)
+                playerSilenceProcessors.remove(player)
+                player.release()
+
+                val newPlayer = createExoPlayer()
+                newPlayer.addListener(this@MusicService)
+                newPlayer.addListener(sleepTimer)
+
+                sleepTimer.player = newPlayer
+
+                try {
+                    mediaSession?.let { (it as MediaSession).player = newPlayer }
+                } catch (e: Exception) {
+                    Timber.tag(TAG).e(e, "Failed to swap player in MediaSession")
+                }
+
+                newPlayer.setMediaItems(mediaItems, currentIndex, currentPosition)
+                newPlayer.repeatMode = repeatMode
+                newPlayer.shuffleModeEnabled = shuffleModeEnabled
+                newPlayer.playbackParameters = playbackParameters
+                newPlayer.volume = volume
+                newPlayer.playWhenReady = playWhenReady
+                newPlayer.prepare()
+
+                player = newPlayer
+                _playerFlow.value = newPlayer
+
+                Timber.tag("MusicService").i("Player recreated with AudioTrackPlaybackParams: $useAudioTrackParams")
+            }
+
+        dataStore.data
+            .map { it[EnableDiscordRPCKey] ?: true }
             .debounce(300)
             .distinctUntilChanged()
-            .collect(scope) { (key, enabled) ->
-                if (discordRpc?.isRpcRunning() == true) {
-                    discordRpc?.closeRPC()
-                }
-                discordRpc = null
-                if (key != null && enabled) {
-                    discordRpc = DiscordRPC(this, key)
-                    if (player.playbackState == Player.STATE_READY && player.playWhenReady) {
-                        currentSong.value?.let {
-                            updateDiscordRPC(it, true)
+            .collect(scope) { enabled ->
+                Timber.tag("DiscordSvc").i("RPC toggle: enabled=%s, isReady=%s, hasToken=%s",
+                    enabled, DiscordRpcManager.isReady(), DiscordRpcManager.getAccessToken() != null)
+                discordRpcEnabled = enabled
+                if (enabled) {
+                    if (DiscordRpcManager.isReady()) {
+                        Timber.tag("DiscordSvc").i("RPC toggle: already ready, updating RPC")
+                        scope.launch(Dispatchers.IO) {
+                            currentSong.value?.let { updateDiscordRPC(it) }
                         }
+                    } else if (DiscordRpcManager.getAccessToken() != null) {
+                        Timber.tag("DiscordSvc").i("RPC toggle: not ready but has token, reconnecting")
+                        scope.launch(Dispatchers.IO) {
+                            if (!DiscordRpcManager.isInitialized()) {
+                                Timber.tag("DiscordSvc").i("RPC toggle: initializing")
+                                DiscordRpcManager.init(this@MusicService)
+                            }
+                            DiscordRpcManager.reconnectWithToken(DiscordRpcManager.getAccessToken()!!)
+                        }
+                    } else {
+                        Timber.tag("DiscordSvc").w("RPC toggle: enabled but no token and not ready")
+                    }
+                } else if (DiscordRpcManager.isReady()) {
+                    Timber.tag("DiscordSvc").i("RPC toggle: disabled, disconnecting")
+                    scope.launch(Dispatchers.IO) {
+                        DiscordRpcManager.disconnect()
                     }
                 }
             }
 
-        // Watch all Discord customization preferences
-        dataStore.data
-            .map {
-                listOf(
-                    it[DiscordUseDetailsKey],
-                    it[DiscordAdvancedModeKey],
-                    it[DiscordStatusKey],
-                    it[DiscordButton1TextKey],
-                    it[DiscordButton1VisibleKey],
-                    it[DiscordButton2TextKey],
-                    it[DiscordButton2VisibleKey],
-                    it[DiscordActivityTypeKey],
-                    it[DiscordActivityNameKey],
-                )
-            }.debounce(300)
-            .distinctUntilChanged()
-            .collect(scope) {
-                if (player.playbackState == Player.STATE_READY) {
+        DiscordRpcManager.accessTokenFlow.collectLatest(scope) { token ->
+                Timber.tag("DiscordSvc").i("Token change: hasToken=%s, initialized=%s, authorized=%s, enabled=%s",
+                    token != null, DiscordRpcManager.isInitialized(), DiscordRpcManager.isAuthorized(), discordRpcEnabled)
+                if (token == null) {
+                    if (DiscordRpcManager.isReady()) {
+                        Timber.tag("DiscordSvc").i("Token change: empty token, disconnecting")
+                        DiscordRpcManager.disconnect()
+                    }
+                    return@collectLatest
+                }
+                if (!discordRpcEnabled) {
+                    Timber.tag("DiscordSvc").i("Token change: RPC disabled, skipping reconnect")
+                    return@collectLatest
+                }
+                if (!DiscordRpcManager.isInitialized()) {
+                    Timber.tag("DiscordSvc").i("Token change: initializing")
+                    DiscordRpcManager.init(this@MusicService)
+                }
+                if (!DiscordRpcManager.isAuthorized()) {
+                    Timber.tag("DiscordSvc").i("Token change: reconnecting with token")
+                    DiscordRpcManager.reconnectWithToken(token)
+                } else {
+                    Timber.tag("DiscordSvc").i("Token change: already authorized, skipping reconnect")
+                }
+            }
+
+        scope.launch {
+            DiscordRpcManager.connectionStatus.collect { status ->
+                Timber.tag("DiscordSvc").i("Status change: %s (discordRpcEnabled=%s, playing=%s)",
+                    status, discordRpcEnabled, player.isPlaying)
+                if (status == DiscordRpcManager.Status.Connected && discordRpcEnabled && player.isPlaying) {
                     currentSong.value?.let { song ->
-                        updateDiscordRPC(song, true)
+                        Timber.tag("DiscordSvc").i("Status change: connected, updating RPC for song=%s", song.song.title)
+                        scope.launch(Dispatchers.IO) {
+                            updateDiscordRPC(song)
+                        }
                     }
                 }
             }
+        }
+
+        scope.launch {
+            DiscordRpcManager.settingsChanged.collect {
+                if (discordRpcEnabled && DiscordRpcManager.isReady()) {
+                    Timber.tag("DiscordSvc").i("Settings changed, re-updating RPC")
+                    currentSong.value?.let { song ->
+                        scope.launch(Dispatchers.IO) {
+                            updateDiscordRPC(song)
+                        }
+                    }
+                }
+            }
+        }
 
         dataStore.data
             .map { it[EnableLastFMScrobblingKey] ?: false }
@@ -1101,17 +1236,18 @@ class MusicService :
         val silenceProcessor = SilenceDetectorAudioProcessor { handleLongSilenceDetected() }
 
         // Set initial state
-        runBlocking {
+        val useAudioTrackPlaybackParams = runBlocking {
             val skipSilence = dataStore.get(SkipSilenceKey, false)
             val instantSkip = dataStore.get(SkipSilenceInstantKey, false)
             silenceProcessor.instantModeEnabled = skipSilence && instantSkip
+            dataStore.get(AudioTrackPlaybackParamsKey, true)
         }
 
         val player =
             ExoPlayer
                 .Builder(this)
                 .setMediaSourceFactory(createMediaSourceFactory())
-                .setRenderersFactory(createRenderersFactory(eqProcessor, silenceProcessor))
+                .setRenderersFactory(createRenderersFactory(eqProcessor, silenceProcessor, useAudioTrackPlaybackParams))
                 .setHandleAudioBecomingNoisy(true)
                 .setWakeMode(C.WAKE_MODE_NETWORK)
                 .setAudioAttributes(
@@ -1330,7 +1466,7 @@ class MusicService :
     }
 
     private fun updateNotification() {
-        mediaSession.setCustomLayout(
+        mediaSession?.setCustomLayout(
             listOf(
                 CommandButton
                     .Builder()
@@ -1971,85 +2107,48 @@ class MusicService :
         )
     }
 
-    private fun applyCachedLoudnessEnhancerNow() {
-        val enhancer = loudnessEnhancer ?: return
-
+    private fun applyCachedAudioNormalizationNow() {
         try {
             val gain = cachedNormalizationGainMb
-
             if (cachedNormalizationEnabled && gain != null) {
-                enhancer.setTargetGain(gain)
-                enhancer.enabled = true
+                volumeNormalizationProcessor.setTargetGain(gain)
+                volumeNormalizationProcessor.enabled = true
             } else {
-                enhancer.enabled = false
+                volumeNormalizationProcessor.enabled = false
             }
         } catch (e: Exception) {
             reportException(e)
-            releaseLoudnessEnhancer()
+            volumeNormalizationProcessor.enabled = false
         }
     }
 
-    private fun createLoudnessEnhancerForSessionId(audioSessionId: Int): Boolean {
-        try {
-            loudnessEnhancer = LoudnessEnhancer(audioSessionId)
-            Timber.tag(TAG).d("LoudnessEnhancer created for sessionId=$audioSessionId")
-
-            return true
-        } catch (e: Exception) {
-            reportException(e)
-            loudnessEnhancer = null
-
-            return false
-        }
-    }
-
-    private fun setupLoudnessEnhancer() {
-        val audioSessionId = player.audioSessionId
-
-        if (audioSessionId == C.AUDIO_SESSION_ID_UNSET || audioSessionId <= 0) {
-            Timber
-                .tag(TAG)
-                .w("setupLoudnessEnhancer: invalid audioSessionId ($audioSessionId), cannot create effect yet")
-            return
-        }
-
-        // Create or recreate enhancer if needed
-        if (loudnessEnhancer == null && !createLoudnessEnhancerForSessionId(audioSessionId)) {
-            return
-        }
-
+    private fun setupAudioNormalization() {
         val requestGeneration = ++loudnessSetupGeneration
         loudnessSetupJob?.cancel()
 
         loudnessSetupJob = scope.launch {
             try {
-                val currentMediaId =
-                    withContext(Dispatchers.Main) {
-                        player.currentMediaItem?.mediaId
-                    }
+                val currentMediaId = withContext(Dispatchers.Main) {
+                    player.currentMediaItem?.mediaId
+                }
 
                 val normalizeAudio = normalizationEnabledCached
 
                 if (normalizeAudio && currentMediaId != null) {
-                    val format =
-                        withContext(Dispatchers.IO) {
-                            database.format(currentMediaId).first()
-                        }
+                    val format = withContext(Dispatchers.IO) {
+                        database.format(currentMediaId).first()
+                    }
 
                     val targetLufs = loudnessLevelCached.targetLufs
 
                     Timber.tag(TAG).d("Audio normalization enabled: $normalizeAudio")
-                    Timber
-                        .tag(TAG)
-                        .d("Format loudnessDb: ${format?.loudnessDb}, perceptualLoudnessDb: ${format?.perceptualLoudnessDb}")
-
-                    // Use perceptualLoudnessDb if available, otherwise fall back to loudnessDb + offset
+                    
                     val measuredLufs: Double? = format?.perceptualLoudnessDb
                         ?: format?.loudnessDb?.let { it + LoudnessLevel.AGGRESSIVE.targetLufs }
 
                     withContext(Dispatchers.Main) {
                         if (!isActive || requestGeneration != loudnessSetupGeneration) return@withContext
-                        if (player.audioSessionId != audioSessionId || player.currentMediaItem?.mediaId != currentMediaId) return@withContext
+                        if (player.currentMediaItem?.mediaId != currentMediaId) return@withContext
 
                         when {
                             measuredLufs != null -> {
@@ -2057,28 +2156,18 @@ class MusicService :
                                 val targetGain = (-loudnessDb * 100.0).toInt()
                                 val clampedGain = targetGain.coerceIn(MIN_GAIN_MB, MAX_GAIN_MB)
 
-                                Timber.tag(TAG)
-                                    .d("Normalization Target LUFS: $targetLufs, Measured LUFS: $measuredLufs, Calculated gain: $targetGain mB, Clamped gain: $clampedGain mB")
-
-                                Timber.tag(TAG)
-                                    .d("Calculated raw normalization gain: $targetGain mB (from loudness: $loudnessDb)")
-
                                 cachedNormalizationGainMb = clampedGain
                                 cachedNormalizationEnabled = true
-                                loudnessEnhancer?.setTargetGain(clampedGain)
-                                loudnessEnhancer?.enabled = true
+                                volumeNormalizationProcessor.setTargetGain(clampedGain)
+                                volumeNormalizationProcessor.enabled = true
                             }
-
                             format == null -> {
-                                // Row not available yet for new track: keep carry-over gain to avoid a jump.
                                 Timber.tag(TAG).d("Loudness row not ready yet; keeping cached normalization state")
                             }
-
                             else -> {
                                 cachedNormalizationGainMb = null
                                 cachedNormalizationEnabled = false
-                                loudnessEnhancer?.enabled = false
-                                Timber.tag(TAG).w("No loudness data available for track - normalization disabled")
+                                volumeNormalizationProcessor.enabled = false
                             }
                         }
                     }
@@ -2087,85 +2176,40 @@ class MusicService :
                         if (!isActive || requestGeneration != loudnessSetupGeneration) return@withContext
                         cachedNormalizationGainMb = null
                         cachedNormalizationEnabled = false
-                        loudnessEnhancer?.enabled = false
-                        Timber.tag(TAG).d("setupLoudnessEnhancer: normalization disabled or mediaId unavailable")
+                        volumeNormalizationProcessor.enabled = false
                     }
                 }
             } catch (e: CancellationException) {
-                Timber.tag(TAG).d("setupLoudnessEnhancer: job cancelled, likely due to new setup request or session change")
                 throw e
             } catch (e: Exception) {
                 reportException(e)
-                releaseLoudnessEnhancer()
+                volumeNormalizationProcessor.enabled = false
             }
-        }
-    }
-
-    private fun releaseLoudnessEnhancer(clearNormalizationCache: Boolean = true) {
-        try {
-            loudnessEnhancer?.release()
-            Timber.tag(TAG).d("LoudnessEnhancer released")
-        } catch (e: Exception) {
-            reportException(e)
-            Timber.tag(TAG).e(e, "Error releasing LoudnessEnhancer: ${e.message}")
-        } finally {
-            if (clearNormalizationCache) {
-                cachedNormalizationGainMb = null
-                cachedNormalizationEnabled = false
-            }
-            loudnessEnhancer = null
         }
     }
 
     private fun openAudioEffectSession() {
         val audioSessionId = player.audioSessionId
         if (audioSessionId == C.AUDIO_SESSION_ID_UNSET || audioSessionId <= 0) {
-            Timber.tag(TAG).w("openAudioEffectSession: invalid audioSessionId=$audioSessionId")
             return
         }
 
-        if (isAudioEffectSessionOpened &&
-            openedAudioEffectSessionId == audioSessionId &&
-            loudnessEnhancer != null
-        ) {
-            applyCachedLoudnessEnhancerNow()
-
-            if (!cachedNormalizationEnabled || cachedNormalizationGainMb == null) {
-                setupLoudnessEnhancer()
-            }
-
+        if (isAudioEffectSessionOpened && openedAudioEffectSessionId == audioSessionId) {
             return
         }
 
         if (isAudioEffectSessionOpened && openedAudioEffectSessionId > 0) {
             closeAudioEffectSession(sessionIdOverride = openedAudioEffectSessionId, clearNormalizationCache = false)
-        } else {
-            releaseLoudnessEnhancer(clearNormalizationCache = false)
-        }
-
-        val enhancerReady = loudnessEnhancer != null || createLoudnessEnhancerForSessionId(audioSessionId)
-
-        if (!enhancerReady) {
-            isAudioEffectSessionOpened = false
-            openedAudioEffectSessionId = C.AUDIO_SESSION_ID_UNSET
-            Timber.tag(TAG).w("openAudioEffectSession: failed to create LoudnessEnhancer for sessionId=$audioSessionId, audio effects will be unavailable")
-            return
         }
 
         isAudioEffectSessionOpened = true
         openedAudioEffectSessionId = audioSessionId
 
-        applyCachedLoudnessEnhancerNow()
-
-        if (!cachedNormalizationEnabled || cachedNormalizationGainMb == null) {
-            setupLoudnessEnhancer()
-        }
-
         sendBroadcast(
-            Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
-                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, audioSessionId)
-                putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
-                putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
+            Intent(android.media.audiofx.AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
+                putExtra(android.media.audiofx.AudioEffect.EXTRA_AUDIO_SESSION, audioSessionId)
+                putExtra(android.media.audiofx.AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+                putExtra(android.media.audiofx.AudioEffect.EXTRA_CONTENT_TYPE, android.media.audiofx.AudioEffect.CONTENT_TYPE_MUSIC)
             },
         )
     }
@@ -2184,9 +2228,6 @@ class MusicService :
                     sessionIdToClose == openedAudioEffectSessionId
 
         if (isClosingCurrentSession) {
-            if (loudnessEnhancer != null) {
-                releaseLoudnessEnhancer(clearNormalizationCache = clearNormalizationCache)
-            }
 
             isAudioEffectSessionOpened = false
             openedAudioEffectSessionId = C.AUDIO_SESSION_ID_UNSET
@@ -2278,9 +2319,7 @@ class MusicService :
 
         lastPlaybackSpeed = -1.0f // force update song
 
-        setupLoudnessEnhancer()
-
-        discordUpdateJob?.cancel()
+        setupAudioNormalization()
 
         scrobbleManager?.onSongStop()
         if (player.playWhenReady && player.playbackState == Player.STATE_READY) {
@@ -2427,7 +2466,7 @@ class MusicService :
         }
 
         if (playWhenReady) {
-            applyCachedLoudnessEnhancerNow()
+            applyCachedAudioNormalizationNow()
         }
     }
 
@@ -2456,40 +2495,100 @@ class MusicService :
             currentMediaMetadata.value = player.currentMetadata
         }
 
-        // Widget and Discord RPC updates
         if (events.containsAny(Player.EVENT_IS_PLAYING_CHANGED)) {
             updateWidgetUI(player.isPlaying)
             if (player.isPlaying) {
+                screenOffHandler.removeCallbacks(screenOffTimeout)
                 startWidgetUpdates()
             } else {
                 stopWidgetUpdates()
-            }
-            if (!player.isPlaying &&
-                !events.containsAny(
-                    Player.EVENT_POSITION_DISCONTINUITY,
-                    Player.EVENT_MEDIA_ITEM_TRANSITION,
-                )
-            ) {
-                scope.launch {
-                    discordRpc?.close()
+                screenOffHandler.postDelayed(screenOffTimeout, 60_000)
+                Handler(Looper.getMainLooper()).post {
+                    if (!DiscordRpcManager.isReady()) {
+                        Timber.tag("DiscordSvc").w("playback paused: not ready, skipping static setActivity")
+                        return@post
+                    }
+                    if (!discordRpcEnabled) {
+                        Timber.tag("DiscordSvc").w("playback paused: RPC disabled, skipping static setActivity")
+                        return@post
+                    }
+                    currentSong.value?.let { song ->
+                        val speed = player.playbackParameters.speed
+                        val artistName = song.artists.joinToString { it.name }.ifEmpty { DiscordDefaults.UNKNOWN_ARTIST }
+                        val albumName = song.album?.title
+                        val songTitle = if (speed != 1.0f) {
+                            "${song.song.title} [${String.format("%.2fx", speed)}]"
+                        } else {
+                            song.song.title
+                        }
+                        val artistThumbnail = song.artists.firstOrNull()?.thumbnailUrl
+                        Timber.tag("DiscordSvc").i("playback paused: setting static activity")
+
+                        val pausedAdvanced = dataStore.get(DiscordAdvancedModeKey, false)
+                        val paType = dataStore.get(DiscordActivityTypeKey, DiscordDefaults.ACTIVITY_TYPE).toIntOrNull() ?: DiscordActivity.TYPE_LISTENING
+                        val paName = dataStore.get(DiscordActivityNameKey, DiscordDefaults.ACTIVITY_NAME)
+                        val paStateTemplate = dataStore.get(DiscordStateTemplateKey, DiscordDefaults.STATE_TEMPLATE)
+                        val paDetailsTemplate = dataStore.get(DiscordDetailsTemplateKey, DiscordDefaults.DETAILS_TEMPLATE)
+                        val paBtn1Enabled = dataStore.get(DiscordButton1EnabledKey, true)
+                        val paBtn1Label = dataStore.get(DiscordButton1LabelKey, DiscordDefaults.BUTTON1_LABEL)
+                        val paBtn1Url = dataStore.get(DiscordButton1UrlKey, DiscordDefaults.BUTTON1_URL_TEMPLATE)
+                        val paBtn2Enabled = dataStore.get(DiscordButton2EnabledKey, true)
+                        val paBtn2Label = dataStore.get(DiscordButton2LabelKey, DiscordDefaults.BUTTON2_LABEL)
+                        val paBtn2Url = dataStore.get(DiscordButton2UrlKey, DiscordDefaults.BUTTON2_URL)
+
+                        DiscordRpcManager.setActivity(
+                            DiscordActivityBuilder.build(
+                                song = song,
+                                artistName = artistName,
+                                albumName = albumName,
+                                artistThumbnail = artistThumbnail,
+                                songTitle = songTitle,
+                                startTimestamp = 0L,
+                                endTimestamp = null,
+                                advancedMode = pausedAdvanced,
+                                activityType = paType,
+                                activityName = paName,
+                                stateTemplate = paStateTemplate,
+                                detailsTemplate = paDetailsTemplate,
+                                btn1Enabled = paBtn1Enabled,
+                                btn1Label = paBtn1Label,
+                                btn1Url = paBtn1Url,
+                                btn2Enabled = paBtn2Enabled,
+                                btn2Label = paBtn2Label,
+                                btn2Url = paBtn2Url,
+                            )
+                        )
+                    }
                 }
             }
         }
 
-        // Update Discord RPC when media item changes or playback starts
         if (events.containsAny(
                 Player.EVENT_MEDIA_ITEM_TRANSITION,
                 Player.EVENT_IS_PLAYING_CHANGED,
             ) && player.isPlaying
         ) {
+            if (!DiscordRpcManager.isReady() && discordRpcEnabled) {
+                val token = DiscordRpcManager.getAccessToken()
+                Timber.tag("DiscordSvc").i("playback event: not ready, token=%s, init=%s",
+                    token != null, DiscordRpcManager.isInitialized())
+                if (token != null) {
+                    if (!DiscordRpcManager.isInitialized()) {
+                        Timber.tag("DiscordSvc").i("playback event: initializing")
+                        DiscordRpcManager.init(this@MusicService)
+                    }
+                    Timber.tag("DiscordSvc").i("playback event: reconnecting with token")
+                    DiscordRpcManager.reconnectWithToken(token)
+                }
+            }
             val mediaId = player.currentMetadata?.id
             if (mediaId != null) {
                 scope.launch {
-                    // Fetch song from database to get full info
                     database.song(mediaId).first()?.let { song ->
                         updateDiscordRPC(song)
                     }
                 }
+            } else {
             }
         }
 
@@ -2590,18 +2689,14 @@ class MusicService :
         super.onPlaybackParametersChanged(playbackParameters)
         if (playbackParameters.speed != lastPlaybackSpeed) {
             lastPlaybackSpeed = playbackParameters.speed
-            discordUpdateJob?.cancel()
-
-            // update scheduling thingy
-            discordUpdateJob =
-                scope.launch {
-                    delay(1000)
-                    if (player.playWhenReady && player.playbackState == Player.STATE_READY) {
-                        currentSong.value?.let { song ->
-                            updateDiscordRPC(song)
-                        }
+            scope.launch {
+                delay(1000)
+                if (player.playWhenReady && player.playbackState == Player.STATE_READY) {
+                    currentSong.value?.let { song ->
+                        updateDiscordRPC(song)
                     }
                 }
+            }
         }
     }
 
@@ -3040,8 +3135,6 @@ class MusicService :
         retryJob?.cancel()
         retryJob =
             scope.launch {
-                delay(RETRY_DELAY_MS)
-
                 val currentPosition = player.currentPosition
                 val currentIndex = player.currentMediaItemIndex
                 if (currentIndex == C.INDEX_UNSET) {
@@ -3195,51 +3288,150 @@ class MusicService :
         }
     }
 
-    private fun updateDiscordRPC(
-        song: Song,
-        showFeedback: Boolean = false,
-    ) {
-        val useDetails = dataStore.get(DiscordUseDetailsKey, false)
+    private suspend fun updateDiscordRPC(song: Song) {
+        if (!DiscordRpcManager.isReady()) {
+            Timber.tag("DiscordSvc").w("updateDiscordRPC: skipping — not ready")
+            return
+        }
+        if (!discordRpcEnabled) {
+            Timber.tag("DiscordSvc").w("updateDiscordRPC: skipping — RPC disabled")
+            return
+        }
+
+        Timber.tag("DiscordSvc").i("updateDiscordRPC: song=%s", song.song.title)
+
+        // ExoPlayer must be accessed on the main thread
+        val (currentPosition, speed) = withContext(Dispatchers.Main.immediate) {
+            player.currentPosition to player.playbackParameters.speed
+        }
+        val adjustedTime = (currentPosition / speed).toLong()
+        val now = System.currentTimeMillis() / 1000
+        val startTime = now - adjustedTime / 1000
+        val remainingMs = song.song.duration * 1000L - currentPosition
+        val adjustedRemainingMs = (remainingMs / speed).toLong()
+
+        val artistName = song.artists.joinToString { it.name }.ifEmpty { DiscordDefaults.UNKNOWN_ARTIST }
+        val albumName = song.album?.title
+        val songTitle = if (speed != 1.0f) {
+            "${song.song.title} [${String.format("%.2fx", speed)}]"
+        } else {
+            song.song.title
+        }
+        val artistThumbnail = song.artists.firstOrNull()?.thumbnailUrl
+
         val advancedMode = dataStore.get(DiscordAdvancedModeKey, false)
+        val activityType = dataStore.get(DiscordActivityTypeKey, DiscordDefaults.ACTIVITY_TYPE).toIntOrNull() ?: DiscordActivity.TYPE_LISTENING
+        val activityName = dataStore.get(DiscordActivityNameKey, DiscordDefaults.ACTIVITY_NAME)
+        val stateTemplate = dataStore.get(DiscordStateTemplateKey, DiscordDefaults.STATE_TEMPLATE)
+        val detailsTemplate = dataStore.get(DiscordDetailsTemplateKey, DiscordDefaults.DETAILS_TEMPLATE)
+        val btn1Enabled = dataStore.get(DiscordButton1EnabledKey, true)
+        val btn1Label = dataStore.get(DiscordButton1LabelKey, DiscordDefaults.BUTTON1_LABEL)
+        val btn1Url = dataStore.get(DiscordButton1UrlKey, DiscordDefaults.BUTTON1_URL_TEMPLATE)
+        val btn2Enabled = dataStore.get(DiscordButton2EnabledKey, true)
+        val btn2Label = dataStore.get(DiscordButton2LabelKey, DiscordDefaults.BUTTON2_LABEL)
+        val btn2Url = dataStore.get(DiscordButton2UrlKey, DiscordDefaults.BUTTON2_URL)
 
-        val status = if (advancedMode) dataStore.get(DiscordStatusKey, "online") else "online"
-        val b1Text = if (advancedMode) dataStore.get(DiscordButton1TextKey, "") else ""
-        val b1Visible = if (advancedMode) dataStore.get(DiscordButton1VisibleKey, true) else true
-        val b2Text = if (advancedMode) dataStore.get(DiscordButton2TextKey, "") else ""
-        val b2Visible = if (advancedMode) dataStore.get(DiscordButton2VisibleKey, true) else true
-        val activityType = if (advancedMode) dataStore.get(DiscordActivityTypeKey, "listening") else "listening"
-        val activityName = if (advancedMode) dataStore.get(DiscordActivityNameKey, "") else ""
+        val activity = DiscordActivityBuilder.build(
+            song = song,
+            artistName = artistName,
+            albumName = albumName,
+            artistThumbnail = artistThumbnail,
+            songTitle = songTitle,
+            startTimestamp = startTime,
+            endTimestamp = now + adjustedRemainingMs / 1000,
+            advancedMode = advancedMode,
+            activityType = activityType,
+            activityName = activityName,
+            stateTemplate = stateTemplate,
+            detailsTemplate = detailsTemplate,
+            btn1Enabled = btn1Enabled,
+            btn1Label = btn1Label,
+            btn1Url = btn1Url,
+            btn2Enabled = btn2Enabled,
+            btn2Label = btn2Label,
+            btn2Url = btn2Url,
+        )
 
-        discordUpdateJob?.cancel()
-        discordUpdateJob =
-            scope.launch {
-                discordRpc
-                    ?.updateSong(
-                        song,
-                        player.currentPosition,
-                        player.playbackParameters.speed,
-                        useDetails,
-                        status,
-                        b1Text,
-                        b1Visible,
-                        b2Text,
-                        b2Visible,
-                        activityType,
-                        activityName,
-                    )?.onFailure {
-                        // Rate limited or error
-                        if (showFeedback) {
-                            Handler(Looper.getMainLooper()).post {
-                                Toast
-                                    .makeText(
-                                        this@MusicService,
-                                        "Discord RPC update failed: ${it.message}",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                            }
-                        }
-                    }
+        Timber.tag("DiscordSvc").i("updateDiscordRPC: type=%d name=%s state=%s details=%s start=%d end=%d",
+            activity.activityType, activity.name, activity.state, activity.details, activity.startTimestamp, activity.endTimestamp)
+
+        DiscordRpcManager.setActivity(activity)
+
+        val statusStr = dataStore.get(DiscordUserStatusKey, DiscordDefaults.USER_STATUS)
+        val status = when (statusStr) {
+            DiscordDefaults.STATUS_IDLE -> if (advancedMode) DiscordRpcManager.StatusType.Idle else DiscordRpcManager.StatusType.Online
+            DiscordDefaults.STATUS_DND -> if (advancedMode) DiscordRpcManager.StatusType.Dnd else DiscordRpcManager.StatusType.Online
+            else -> DiscordRpcManager.StatusType.Online
+        }
+        DiscordRpcManager.setOnlineStatus(status)
+
+        val fetched = fetchArtistThumbnail(song)
+        if (fetched != null && DiscordRpcManager.isReady() && discordRpcEnabled) {
+            Timber.tag("DiscordSvc").i("updateDiscordRPC: updating with fetched thumbnail")
+            val fetchedArtistName = fetched.artists.joinToString { it.name }.ifEmpty { DiscordDefaults.UNKNOWN_ARTIST }
+            val fetchedAlbumName = fetched.album?.title
+            val fetchedArtistThumbnail = fetched.artists.firstOrNull()?.thumbnailUrl
+
+            val fetchedActivity = DiscordActivityBuilder.build(
+                song = fetched,
+                artistName = fetchedArtistName,
+                albumName = fetchedAlbumName,
+                artistThumbnail = fetchedArtistThumbnail,
+                songTitle = songTitle,
+                startTimestamp = startTime,
+                endTimestamp = now + adjustedRemainingMs / 1000,
+                advancedMode = advancedMode,
+                activityType = activityType,
+                activityName = activityName,
+                stateTemplate = stateTemplate,
+                detailsTemplate = detailsTemplate,
+                btn1Enabled = btn1Enabled,
+                btn1Label = btn1Label,
+                btn1Url = btn1Url,
+                btn2Enabled = btn2Enabled,
+                btn2Label = btn2Label,
+                btn2Url = btn2Url,
+            )
+
+            DiscordRpcManager.setActivity(fetchedActivity)
+        } else {
+            Timber.tag("DiscordSvc").i("updateDiscordRPC: fetched=%s (no thumbnail update)", fetched != null)
+        }
+    }
+
+    private suspend fun fetchArtistThumbnail(song: Song): Song? {
+        val artist = song.artists.firstOrNull()
+        if (artist == null) return null
+        if (artist.thumbnailUrl != null) return null
+
+        val browseId = when {
+            artist.channelId != null && !artist.channelId.startsWith("LA")
+                && !artist.channelId.startsWith("FEmusic_library_privately_owned") -> {
+                artist.channelId
             }
+            !artist.id.startsWith("LA")
+                && !artist.id.startsWith("FEmusic_library_privately_owned") -> {
+                artist.id
+            }
+            else -> return null
+        }
+
+        return try {
+            val artistPage = withContext(Dispatchers.IO) {
+                YouTube.artist(browseId).getOrNull()
+            }
+            val thumbnail = artistPage?.artist?.thumbnail?.resize(1080, 1080)
+            if (thumbnail != null) {
+                withContext(Dispatchers.IO) {
+                    database.update(artist.copy(thumbnailUrl = thumbnail))
+                }
+                database.getSongById(song.song.id)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun createDataSourceFactory(): DataSource.Factory {
@@ -3255,11 +3447,19 @@ class MusicService :
                         mediaId,
                         dataSpec.position,
                         if (dataSpec.length >= 0) dataSpec.length else 1,
-                    ) ||
-                    (usePlayerCache && playerCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH))
+                    )
                 ) {
                     scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
                     return@Factory dataSpec
+                }
+
+                if (usePlayerCache && playerCache.isCached(mediaId, dataSpec.position, CHUNK_LENGTH)) {
+                    songUrlCache[mediaId]?.takeIf { it.second > System.currentTimeMillis() }?.let { (url, _) ->
+                        scope.launch(Dispatchers.IO) { recoverSong(mediaId) }
+                        return@Factory dataSpec.withUri(url.toUri())
+                    }
+                    Timber.tag(TAG).w("Ghost cache entry for $mediaId, re-fetching")
+                    playerCache.removeResource(mediaId)
                 }
 
                 songUrlCache[mediaId]?.takeIf { it.second > System.currentTimeMillis() }?.let {
@@ -3267,10 +3467,10 @@ class MusicService :
                     return@Factory dataSpec.withUri(it.first.toUri())
                 }
             } else {
-                Timber.tag("MusicService").i("BYPASSING CACHE for $mediaId due to quality change")
+                Timber.tag(TAG).i("BYPASSING CACHE for $mediaId due to quality change")
             }
 
-            Timber.tag("MusicService").i("FETCHING STREAM: $mediaId | quality=$audioQuality")
+            Timber.tag(TAG).i("FETCHING STREAM: $mediaId | quality=$audioQuality")
             val playbackData =
                 runBlocking(Dispatchers.IO) {
                     YTPlayerUtils.playerResponseForPlayback(
@@ -3346,13 +3546,18 @@ class MusicService :
 
                 // Clear bypass flag now that we've fetched fresh stream
                 if (bypassCacheForQualityChange.remove(mediaId)) {
-                    Timber.tag("MusicService").d("Cleared bypass cache flag for $mediaId after fresh fetch")
+                    Timber.tag(TAG).d("Cleared bypass cache flag for $mediaId after fresh fetch")
                 }
 
                 val streamUrl = nonNullPlayback.streamUrl
 
                 songUrlCache[mediaId] =
                     streamUrl to System.currentTimeMillis() + (nonNullPlayback.streamExpiresInSeconds * 1000L)
+
+                nonNullPlayback.playbackTracking?.videostatsPlaybackUrl?.baseUrl?.let {
+                    playbackUrlCache[cacheKey(mediaId)] = it
+                }
+
                 return@Factory dataSpec.withUri(streamUrl.toUri()).subrange(dataSpec.uriPositionOffset, CHUNK_LENGTH)
             }
         }
@@ -3362,13 +3567,14 @@ class MusicService :
         DefaultMediaSourceFactory(
             createDataSourceFactory(),
             ExtractorsFactory {
-                arrayOf(MatroskaExtractor(), FragmentedMp4Extractor())
+                arrayOf(MatroskaExtractor(), FragmentedMp4Extractor(), Mp4Extractor())
             },
         )
 
     private fun createRenderersFactory(
         eqProcessor: CustomEqualizerAudioProcessor,
         silenceProcessor: SilenceDetectorAudioProcessor,
+        useAudioTrackPlaybackParams: Boolean,
     ) = object : DefaultRenderersFactory(this) {
         override fun buildAudioSink(
             context: Context,
@@ -3377,11 +3583,12 @@ class MusicService :
         ) = DefaultAudioSink
             .Builder(this@MusicService)
             .setEnableFloatOutput(enableFloatOutput)
-            .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+            .setEnableAudioTrackPlaybackParams(useAudioTrackPlaybackParams)
             .setAudioProcessorChain(
                 DefaultAudioSink.DefaultAudioProcessorChain(
                     // 2. Inject processor into audio pipeline
                     arrayOf(
+                        volumeNormalizationProcessor,
                         eqProcessor,
                         silenceProcessor,
                     ),
@@ -3417,22 +3624,24 @@ class MusicService :
         }
 
         if (playbackStats.totalPlayTimeMs >= historyDurationMs) {
-            CoroutineScope(Dispatchers.IO).launch {
+            scope.launch(Dispatchers.IO) {
                 val playbackUrl =
-                    database.format(mediaItem.mediaId).first()?.playbackUrl
+                    playbackUrlCache[cacheKey(mediaItem.mediaId)]
                         ?: YTPlayerUtils
                             .playerResponseForMetadata(mediaItem.mediaId, null)
                             .getOrNull()
                             ?.playbackTracking
                             ?.videostatsPlaybackUrl
                             ?.baseUrl
-                playbackUrl?.let {
-                    YouTube
-                        .registerPlayback(null, playbackUrl)
-                        .onFailure {
-                            reportException(it)
-                        }
+                if (playbackUrl == null) {
+                    Timber.tag(TAG).w("No playback tracking URL available for $mediaItem.mediaId, skipping YouTube history registration")
+                    return@launch
                 }
+                YouTube
+                    .registerPlayback(null, playbackUrl)
+                    .onFailure {
+                        reportException(it)
+                    }
             }
         }
     }
@@ -3633,15 +3842,16 @@ class MusicService :
         if (dataStore.get(PersistentQueueKey, true)) {
             saveQueueToDisk()
         }
-        if (discordRpc?.isRpcRunning() == true) {
-            discordRpc?.closeRPC()
+        screenOffHandler.removeCallbacks(screenOffTimeout)
+        if (DiscordRpcManager.isReady()) {
+            Timber.tag("DiscordSvc").i("onDestroy: disconnecting Discord RPC")
+            DiscordRpcManager.disconnect()
         }
-        discordRpc = null
         connectivityObserver.unregister()
         abandonAudioFocus()
         closeAudioEffectSession()
         mediaLibrarySessionCallback.release()
-        mediaSession.release()
+        mediaSession?.release()
         player.removeListener(this)
         player.removeListener(sleepTimer)
         playerSilenceProcessors.remove(player)
@@ -3649,7 +3859,6 @@ class MusicService :
         // or we can't easily reference the specific processor created in createExoPlayer here without storing it.
         // But since we are destroying the service, it's fine.
         player.release()
-        discordUpdateJob?.cancel()
         scope.cancel()
         super.onDestroy()
     }
@@ -3859,7 +4068,7 @@ class MusicService :
 
             PlaylistWidgetReceiver.TARGET_TYPE_TOP -> {
                 val limit = targetId.toIntOrNull() ?: 50
-                val songs = database.mostPlayedSongs(0L, limit = limit).first()
+                val songs = database.mostPlayedSongs(LocalDateTime.of(1970, 1, 1, 0, 0), limit = limit).first()
                 if (songs.isEmpty()) return null
                 ListQueue(
                     title = getString(R.string.my_top),
@@ -4003,7 +4212,7 @@ class MusicService :
                 val songData = currentSong.value
                 val song = songData?.song
                 val songTitle = song?.title ?: getString(R.string.no_song_playing)
-                val artistName = songData?.artists?.joinToString(", ") { it.name } ?: getString(R.string.tap_to_open)
+                 val artistName = songData?.artists?.joinToArtistString(getArtistSeparator(this@MusicService)) { it.name } ?: getString(R.string.tap_to_open)
                 val isLiked = songData?.song?.liked == true
 
                 widgetManager.updateWidgets(
@@ -4220,7 +4429,7 @@ class MusicService :
         sleepTimer.player = player
 
         try {
-            (mediaSession as MediaSession).player = player
+            mediaSession?.let { (it as MediaSession).player = player }
         } catch (e: Exception) {
             timber.log.Timber.e(e, "Failed to swap player in MediaSession")
         }
