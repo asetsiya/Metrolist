@@ -1,0 +1,4 @@
+- [x] Update `listentogether.proto` with Ping/Pong payloads
+- [x] Add `PingPayload` and `PongPayload` to `Protocol.kt`
+- [x] Update `MessageCodec.kt` to support Ping/Pong
+- [x] Verify build

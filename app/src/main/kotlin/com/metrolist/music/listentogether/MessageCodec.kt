@@ -170,6 +170,10 @@ class MessageCodec(
             is TransferHostPayload -> Listentogether.TransferHostPayload.newBuilder()
                 .setNewHostId(payload.newHostId)
                 .build()
+            is PingPayload -> Listentogether.PingPayload.newBuilder()
+                .setClientTime(payload.clientTime)
+                .setSequence(payload.sequence)
+                .build()
             else -> throw IllegalArgumentException("Unsupported payload type: ${payload::class.simpleName}")
         }
     }
@@ -249,6 +253,15 @@ class MessageCodec(
             MessageTypes.ERROR -> {
                 val pb = Listentogether.ErrorPayload.parseFrom(payloadBytes)
                 ErrorPayload(pb.code, pb.message)
+            }
+            MessageTypes.PONG -> {
+                val pb = Listentogether.PongPayload.parseFrom(payloadBytes)
+                PongPayload(
+                    pb.clientTime,
+                    pb.serverReceiveTime,
+                    pb.serverSendTime,
+                    pb.sequence
+                )
             }
             MessageTypes.HOST_CHANGED -> {
                 val pb = Listentogether.HostChangedPayload.parseFrom(payloadBytes)
