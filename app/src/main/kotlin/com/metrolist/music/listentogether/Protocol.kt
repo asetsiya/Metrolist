@@ -322,12 +322,6 @@ data class ReconnectPayload(
 )
 
 @Serializable
-data class PingPayload(
-    @SerialName("client_time") val clientTime: Long,
-    val sequence: Long
-)
-
-@Serializable
 data class ReconnectedPayload(
     @SerialName("room_code") val roomCode: String,
     @SerialName("user_id") val userId: String,
@@ -345,12 +339,4 @@ data class UserReconnectedPayload(
 data class UserDisconnectedPayload(
     @SerialName("user_id") val userId: String,
     val username: String
-)
-
-@Serializable
-data class PongPayload(
-    @SerialName("client_time") val clientTime: Long,
-    @SerialName("server_receive_time") val serverReceiveTime: Long,
-    @SerialName("server_send_time") val serverSendTime: Long,
-    val sequence: Long
 )
