@@ -837,8 +837,8 @@
     <string name="widget_playlists_description">Mini oynatıcı kontrolleri olan oynatma listesi kısayolları</string>
     <string name="choose_something_below">Aşağıdan bir şey seç</string>
     <string name="and">ve</string>
-    <string name="auto_radio_queue">otomatik radyo sırası</string>
-    <string name="auto_radio_queue_desc">aramadan veya ana ekrandan şarkı başlatıldığında otomatik olarak şarkı sırası oluştur</string>
+    <string name="auto_radio_queue">Otomatik radyo sırası</string>
+    <string name="auto_radio_queue_desc">Aramadan veya ana ekrandan şarkı başlatıldığında otomatik olarak şarkı sırası oluştur</string>
     <string name="audio_track_playback_params">Donanım ses işlemeyi kullan</string>
     <string name="audio_track_playback_params_description">Yazılımsal işleme yerine hız/perde (speed/pitch) değişiklikleri için Android\'in AudioTrack altyapısını kullanır. Aşırı perde değerlerinde daha güvenilirdir</string>
     <string name="discord_status_connecting">Discord\'a bağlanılıyor…</string>
