@@ -6,8 +6,6 @@
 package com.metrolist.music.ui.component
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
@@ -24,9 +22,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.metrolist.music.lyrics.LyricsEntry
+
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
+import kotlinx.coroutines.isActive
 
 sealed class LyricsListItem {
     data class Line(val index: Int, val entry: LyricsEntry) : LyricsListItem()
@@ -44,7 +46,7 @@ sealed class LyricsListItem {
 internal fun IntervalIndicator(
     gapStartMs: Long,
     gapEndMs: Long,
-    currentPositionMs: Long,
+    currentPositionProvider: () -> Long,
     visible: Boolean,
     color: Color,
     modifier: Modifier = Modifier
@@ -62,18 +64,22 @@ internal fun IntervalIndicator(
         }
     }
 
-    val density = LocalDensity.current
     val targetHeightDp = 72.dp
 
-    val progress = if (gapEndMs > gapStartMs) {
-        ((currentPositionMs - gapStartMs).toFloat() / (gapEndMs - gapStartMs).toFloat()).coerceIn(0f, 1f)
-    } else 0f
+    var currentProgress by remember { mutableFloatStateOf(0f) }
 
-    val animatedProgress by animateFloatAsState(
-        targetValue = progress,
-        animationSpec = tween(durationMillis = 100, easing = LinearEasing),
-        label = "intervalProgress"
-    )
+    LaunchedEffect(visible, gapStartMs, gapEndMs) {
+        if (visible && gapEndMs > gapStartMs) {
+            while (isActive) {
+                withFrameMillis {
+                    val pos = currentPositionProvider()
+                    currentProgress = ((pos - gapStartMs).toFloat() / (gapEndMs - gapStartMs).toFloat()).coerceIn(0f, 1f)
+                }
+            }
+        } else {
+            currentProgress = 0f
+        }
+    }
 
     Box(
         modifier = modifier
@@ -86,7 +92,7 @@ internal fun IntervalIndicator(
         contentAlignment = Alignment.Center
     ) {
         CircularWavyProgressIndicator(
-            progress = { animatedProgress },
+            progress = { currentProgress },
             modifier = Modifier
                 .size(36.dp)
                 .alpha(alpha.value),

@@ -297,16 +297,19 @@ fun ExperimentalLyrics(
         PlayerBackgroundStyle.BLUR, PlayerBackgroundStyle.GRADIENT -> Color.White
     }
 
-    var currentPositionState by remember {
-        mutableLongStateOf(runCatching { playerConnection.player.currentPosition }.getOrDefault(0L))
+    val currentPositionRef = remember {
+        object {
+            var position: Long = runCatching { playerConnection.player.currentPosition }.getOrDefault(0L)
+        }
     }
     var activeLineIndices by remember(lines, currentSong?.id) {
-        mutableStateOf(
-            findActiveLineIndices(
-                lines,
-                currentPositionState + (currentSong?.song?.lyricsOffset ?: 0),
-            ).toSet(),
-        )
+        mutableStateOf(emptySet<Int>())
+    }
+    var visibleBackgroundLineIndices by remember(lines, currentSong?.id) {
+        mutableStateOf(emptySet<Int>())
+    }
+    var activeIndicatorListIndex by remember(mergedLyricsList) {
+        mutableStateOf<Int?>(null)
     }
     var isSeeking by remember { mutableStateOf(false) }
     var showProgressDialog by remember { mutableStateOf(false) }
@@ -335,24 +338,27 @@ fun ExperimentalLyrics(
         }
     }
 
-    LaunchedEffect(lyrics, lines) {
+    LaunchedEffect(lyrics, lines, mergedLyricsList) {
         if (lyrics.isNullOrEmpty() || lines.isEmpty()) {
             activeLineIndices = emptySet()
+            visibleBackgroundLineIndices = emptySet()
+            activeIndicatorListIndex = null
             return@LaunchedEffect
         }
         
-        var lastPlayerPos = playerConnection.player.currentPosition
+        var lastPlayerPos = runCatching { playerConnection.player.currentPosition }.getOrDefault(0L)
         var lastUpdateTime = System.currentTimeMillis()
         
         while (isActive) {
             withFrameNanos { _ -> }
             val now = System.currentTimeMillis()
             val sliderPosition = sliderPositionProvider()
-            isSeeking = sliderPosition != null
+            val isCurrentlySeeking = sliderPosition != null
+            if (isSeeking != isCurrentlySeeking) {
+                isSeeking = isCurrentlySeeking
+            }
             
-            val position = if (isSeeking) {
-                sliderPosition!!
-            } else {
+            val position = sliderPosition ?: run {
                 val playerPos = playerConnection.player.currentPosition
                 if (playerPos != lastPlayerPos) {
                     lastPlayerPos = playerPos
@@ -361,12 +367,11 @@ fun ExperimentalLyrics(
                 val elapsed = now - lastUpdateTime
                 lastPlayerPos + (if (playerConnection.player.isPlaying) elapsed else 0)
             }
-            
-            currentPositionState = position
+            currentPositionRef.position = position
             val lyricsOffset = currentSong?.song?.lyricsOffset ?: 0
             val effectivePosition = position + lyricsOffset
             
-            val activeIndices = if (isSynced) {
+            val newActiveIndices = if (isSynced) {
                 val active = findActiveLineIndices(lines, effectivePosition).toMutableSet()
                 for (i in active.toList()) {
                     if (lines.getOrNull(i)?.isBackground == true) {
@@ -382,7 +387,40 @@ fun ExperimentalLyrics(
             } else {
                 lines.indices.toSet()
             }
-            activeLineIndices = activeIndices
+            if (activeLineIndices != newActiveIndices) {
+                activeLineIndices = newActiveIndices
+            }
+
+            if (isSynced) {
+                val newBgVisible = mutableSetOf<Int>()
+                for (i in lines.indices) {
+                    val entry = lines[i]
+                    if (entry.isBackground) {
+                        val pairedMain = (i - 1 downTo 0).firstOrNull { lines.getOrNull(it)?.isBackground == false } ?: -1
+                        val inGap = if (pairedMain != -1) {
+                            val mainTime = lines[pairedMain].time
+                            effectivePosition in mainTime..entry.time
+                        } else false
+                        if (newActiveIndices.contains(i) || (pairedMain != -1 && newActiveIndices.contains(pairedMain)) || inGap) {
+                            newBgVisible.add(i)
+                        }
+                    }
+                }
+                if (visibleBackgroundLineIndices != newBgVisible) {
+                    visibleBackgroundLineIndices = newBgVisible
+                }
+            }
+
+            val newIndicator = if (newActiveIndices.isEmpty()) {
+                mergedLyricsList.indexOfFirst { item ->
+                    item is LyricsListItem.Indicator &&
+                        effectivePosition >= item.gapStartMs &&
+                        effectivePosition <= item.gapEndMs - 650L
+                }.takeIf { it >= 0 }
+            } else null
+            if (activeIndicatorListIndex != newIndicator) {
+                activeIndicatorListIndex = newIndicator
+            }
         }
     }
 
@@ -415,7 +453,7 @@ fun ExperimentalLyrics(
         mergedLyricsList,
         activeLineIndices,
         anchoredLineIndex,
-        currentPositionState,
+        activeIndicatorListIndex,
     ) {
         derivedStateOf {
             val activeLineListIndex = if (activeLineIndices.isEmpty()) {
@@ -429,11 +467,7 @@ fun ExperimentalLyrics(
             if (activeLineListIndex >= 0) {
                 activeLineListIndex
             } else {
-                mergedLyricsList.indexOfFirst { item ->
-                    item is LyricsListItem.Indicator &&
-                        currentPositionState >= item.gapStartMs &&
-                        currentPositionState <= item.gapEndMs - 650L
-                }.takeIf { it >= 0 }
+                activeIndicatorListIndex
             }
         }
     }
@@ -469,30 +503,35 @@ fun ExperimentalLyrics(
         // the viewport's offset, so playback never changes the layout of individual lines.
         val positions by remember(mergedLyricsList) {
             derivedStateOf {
-                val map = mutableMapOf<Int, Float>()
+                val n = mergedLyricsList.size
+                val arr = FloatArray(n)
                 var currentY = 0f
-                mergedLyricsList.forEachIndexed { index, item ->
-                    map[index] = currentY
-                    val height = itemHeights[index]?.toFloat()
+                for (i in 0 until n) {
+                    arr[i] = currentY
+                    val item = mergedLyricsList[i]
+                    val height = itemHeights[i]?.toFloat()
                         ?: (if (item is LyricsListItem.Indicator) indicatorHeightPx else lineHeightPx)
                     val noGap = (item as? LyricsListItem.Line)?.entry?.isBackground == true || item is LyricsListItem.Indicator
                     currentY += height + if (noGap) 0f else itemGapPx
                 }
-                map
+                arr
             }
         }
         // Let the first and last entries reach the playback anchor instead of pinning
         // either edge of the list to the edge of the viewport.
         val firstAnchorOffset = contentTop - anchorY
-        val lastAnchorOffset = remember(positions) {
+        val lastAnchorOffset = remember(positions, contentTop, anchorY, mergedLyricsList.lastIndex) {
             derivedStateOf {
-                contentTop + (positions[mergedLyricsList.lastIndex] ?: 0f) - anchorY
+                val lastY = if (positions.isNotEmpty() && mergedLyricsList.isNotEmpty()) {
+                    positions[mergedLyricsList.lastIndex]
+                } else 0f
+                contentTop + lastY - anchorY
             }
         }
-        val scrollClampMin = remember(lastAnchorOffset) { 
+        val scrollClampMin = remember(lastAnchorOffset, firstAnchorOffset) { 
             derivedStateOf { minOf(firstAnchorOffset, lastAnchorOffset.value) } 
         }
-        val scrollClampMax = remember(lastAnchorOffset) { 
+        val scrollClampMax = remember(lastAnchorOffset, firstAnchorOffset) { 
             derivedStateOf { maxOf(firstAnchorOffset, lastAnchorOffset.value) } 
         }
 
@@ -500,13 +539,35 @@ fun ExperimentalLyrics(
             scrollOffset.updateBounds(scrollClampMin.value, scrollClampMax.value)
         }
 
-        val autoScrollTarget = remember(positions, activeListIndex, scrollClampMin, scrollClampMax) {
+        val autoScrollTarget = remember(
+            positions,
+            activeListIndex,
+            scrollClampMin,
+            scrollClampMax,
+            contentTop,
+            anchorY
+        ) {
             derivedStateOf {
-                if (positions.isEmpty()) {
+                if (positions.isEmpty() || activeListIndex !in positions.indices) {
                     null
                 } else {
-                    ((positions[activeListIndex] ?: 0f) + contentTop - anchorY)
+                    (positions[activeListIndex] + contentTop - anchorY)
                         .coerceIn(scrollClampMin.value, scrollClampMax.value)
+                }
+            }
+        }
+
+        val visibleRange by remember(positions, contentTop, maxHeightPx, mergedLyricsList.size) {
+            derivedStateOf {
+                if (positions.isEmpty() || mergedLyricsList.isEmpty()) {
+                    IntRange.EMPTY
+                } else {
+                    val currentOffset = scrollOffset.value
+                    val minListY = currentOffset - contentTop - maxHeightPx
+                    val maxListY = currentOffset - contentTop + (2f * maxHeightPx)
+                    val start = findStartIndex(positions, minListY)
+                    val end = findEndIndex(positions, maxListY)
+                    start..end
                 }
             }
         }
@@ -573,6 +634,9 @@ fun ExperimentalLyrics(
                             while (isActive) {
                                 val velocity = awaitPointerEventScope {
                                     val down = awaitFirstDown(requireUnconsumed = false)
+                                    if (!isAutoScrollEnabled && scrollOffset.isRunning) {
+                                        scrollCommands.trySend(ScrollCommand.Stop)
+                                    }
                                     val tracker = VelocityTracker()
                                     tracker.addPointerInputChange(down)
                                     var dragging = false
@@ -607,9 +671,6 @@ fun ExperimentalLyrics(
                         }
                     }
             ) {
-                val lyricsOffsetVal = (currentSong?.song?.lyricsOffset ?: 0).toLong()
-                val currentEffectivePosition = currentPositionState + lyricsOffsetVal
-                
                 if (isLyricsProviderShown) {
                     Text(
                         text = stringResource(R.string.lyrics_from_provider, lyricsEntity.provider),
@@ -624,7 +685,8 @@ fun ExperimentalLyrics(
                     )
                 }
 
-                mergedLyricsList.forEachIndexed { listIndex, listItem ->
+                for (listIndex in visibleRange) {
+                    val listItem = mergedLyricsList[listIndex]
                     key(listItem) {
                         Box(
                             modifier = Modifier
@@ -634,37 +696,38 @@ fun ExperimentalLyrics(
                                     layout(p.width, 0) { p.place(0, 0) }
                                 }
                                 .offset {
-                                    val y = contentTop + (positions[listIndex] ?: (listIndex * lineHeightPx)) - scrollOffset.value
+                                    val y = contentTop + (positions.getOrElse(listIndex) { listIndex * lineHeightPx }) - scrollOffset.value
                                     IntOffset(0, y.roundToInt())
                                 }
                         ) {
                             when (listItem) {
                                 is LyricsListItem.Indicator -> {
-                                    val visible =
-                                        isAutoScrollEnabled &&
-                                            currentPositionState >= listItem.gapStartMs &&
-                                            currentPositionState <= listItem.gapEndMs - 650L
-                                    IntervalIndicator(listItem.gapStartMs, listItem.gapEndMs - 650L, currentPositionState, visible, expressiveAccent, 
-                                        Modifier.fillMaxWidth().onSizeChanged { itemHeights[listIndex] = it.height }.padding(horizontal = 24.dp).wrapContentWidth(Alignment.CenterHorizontally))
+                                    val visible = isAutoScrollEnabled && (listIndex == activeIndicatorListIndex)
+                                    IntervalIndicator(
+                                        gapStartMs = listItem.gapStartMs,
+                                        gapEndMs = listItem.gapEndMs - 650L,
+                                        currentPositionProvider = { currentPositionRef.position },
+                                        visible = visible,
+                                        color = expressiveAccent,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .onSizeChanged { itemHeights[listIndex] = it.height }
+                                            .padding(horizontal = 24.dp)
+                                            .wrapContentWidth(Alignment.CenterHorizontally)
+                                    )
                                 }
                                 is LyricsListItem.Line -> {
                                     val index = listItem.index
                                     val item = listItem.entry
                                     val isActiveLine = activeLineIndices.contains(index)
-                                    val pairedMainLineIndex = if (item.isBackground) (index - 1 downTo 0).firstOrNull { lines.getOrNull(it)?.isBackground == false } ?: -1 else -1
-                                    
-                                    val isInGapWithMain = if (item.isBackground && pairedMainLineIndex != -1) {
-                                        val pairedMainLine = lines[pairedMainLineIndex]
-                                        currentEffectivePosition >= pairedMainLine.time && currentEffectivePosition <= item.time
-                                    } else false
-                                    
-                                    val bgVisible = item.isBackground && (activeLineIndices.contains(pairedMainLineIndex) || activeLineIndices.contains(index) || isInGapWithMain)
-                                    
+                                    val bgVisible = if (item.isBackground) visibleBackgroundLineIndices.contains(index) else false
+
                                     LyricsLine(
                                         index = index, item = item, isSynced = isSynced,
                                         isActiveLine = isActiveLine,
                                         bgVisible = bgVisible, isSelected = selectedIndices.contains(index),
-                                        isSelectionModeActive = isSelectionModeActive, currentPositionState = currentPositionState,
+                                        isSelectionModeActive = isSelectionModeActive,
+                                        sliderPositionProvider = sliderPositionProvider,
                                         lyricsOffset = (currentSong?.song?.lyricsOffset ?: 0).toLong(),
                                         playerConnection = playerConnection, lyricsTextSize = 36f, lyricsLineSpacing = 1.3f,
                                         expressiveAccent = expressiveAccent, lyricsTextPosition = lyricsTextPosition,
@@ -781,4 +844,38 @@ fun ExperimentalLyrics(
             }
         )
     }
+}
+
+private fun findStartIndex(positions: FloatArray, minListY: Float): Int {
+    if (positions.isEmpty()) return 0
+    var low = 0
+    var high = positions.size - 1
+    var result = 0
+    while (low <= high) {
+        val mid = (low + high) ushr 1
+        if (positions[mid] >= minListY) {
+            result = mid
+            high = mid - 1
+        } else {
+            low = mid + 1
+        }
+    }
+    return (result - 3).coerceAtLeast(0)
+}
+
+private fun findEndIndex(positions: FloatArray, maxListY: Float): Int {
+    if (positions.isEmpty()) return 0
+    var low = 0
+    var high = positions.size - 1
+    var result = positions.size - 1
+    while (low <= high) {
+        val mid = (low + high) ushr 1
+        if (positions[mid] <= maxListY) {
+            result = mid
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
+    }
+    return (result + 3).coerceAtMost(positions.size - 1)
 }
