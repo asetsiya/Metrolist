@@ -338,7 +338,20 @@ fun ExperimentalLyrics(
         }
     }
 
-    LaunchedEffect(lyrics, lines, mergedLyricsList) {
+    val backgroundToMainMap = remember(lines) {
+        val map = mutableMapOf<Int, Int>()
+        for (i in lines.indices) {
+            if (lines[i].isBackground) {
+                val pairedMain = (i - 1 downTo 0).firstOrNull { !lines[it].isBackground } ?: -1
+                if (pairedMain != -1) {
+                    map[i] = pairedMain
+                }
+            }
+        }
+        map
+    }
+
+    LaunchedEffect(lyrics, lines, mergedLyricsList, backgroundToMainMap) {
         if (lyrics.isNullOrEmpty() || lines.isEmpty()) {
             activeLineIndices = emptySet()
             visibleBackgroundLineIndices = emptySet()
@@ -374,13 +387,9 @@ fun ExperimentalLyrics(
             val newActiveIndices = if (isSynced) {
                 val active = findActiveLineIndices(lines, effectivePosition).toMutableSet()
                 for (i in active.toList()) {
-                    if (lines.getOrNull(i)?.isBackground == true) {
-                        for (j in i - 1 downTo 0) {
-                            if (lines.getOrNull(j)?.isBackground == false) {
-                                active.add(j)
-                                break
-                            }
-                        }
+                    val pairedMain = backgroundToMainMap[i]
+                    if (pairedMain != null) {
+                        active.add(pairedMain)
                     }
                 }
                 active
@@ -393,17 +402,12 @@ fun ExperimentalLyrics(
 
             if (isSynced) {
                 val newBgVisible = mutableSetOf<Int>()
-                for (i in lines.indices) {
-                    val entry = lines[i]
-                    if (entry.isBackground) {
-                        val pairedMain = (i - 1 downTo 0).firstOrNull { lines.getOrNull(it)?.isBackground == false } ?: -1
-                        val inGap = if (pairedMain != -1) {
-                            val mainTime = lines[pairedMain].time
-                            effectivePosition in mainTime..entry.time
-                        } else false
-                        if (newActiveIndices.contains(i) || (pairedMain != -1 && newActiveIndices.contains(pairedMain)) || inGap) {
-                            newBgVisible.add(i)
-                        }
+                for ((bgIndex, pairedMain) in backgroundToMainMap) {
+                    val mainTime = lines[pairedMain].time
+                    val bgTime = lines[bgIndex].time
+                    val inGap = effectivePosition in mainTime..bgTime
+                    if (newActiveIndices.contains(bgIndex) || newActiveIndices.contains(pairedMain) || inGap) {
+                        newBgVisible.add(bgIndex)
                     }
                 }
                 if (visibleBackgroundLineIndices != newBgVisible) {
@@ -535,6 +539,34 @@ fun ExperimentalLyrics(
             derivedStateOf { maxOf(firstAnchorOffset, lastAnchorOffset.value) } 
         }
 
+        val latestScrollLimits = rememberUpdatedState(scrollClampMin.value to scrollClampMax.value)
+        val dragTargetOffsetRef = remember { object { var value: Float = 0f } }
+
+        val onItemHeightChanged = rememberUpdatedState { index: Int, newHeight: Int ->
+            val prevHeight = itemHeights[index]
+            if (prevHeight == newHeight) return@rememberUpdatedState
+
+            val fallbackHeight = if (mergedLyricsList.getOrNull(index) is LyricsListItem.Indicator) {
+                indicatorHeightPx.roundToInt()
+            } else {
+                lineHeightPx.roundToInt()
+            }
+            val oldHeight = prevHeight ?: fallbackHeight
+            val delta = (newHeight - oldHeight).toFloat()
+
+            itemHeights[index] = newHeight
+
+            if (delta != 0f && positions.isNotEmpty() && hasAutoPositioned) {
+                val currentAnchorY = scrollOffset.value - contentTop + anchorY
+                val itemY = positions.getOrElse(index) { 0f }
+                if (itemY < currentAnchorY) {
+                    val newOffset = scrollOffset.value + delta
+                    dragTargetOffsetRef.value += delta
+                    scrollCommands.trySend(ScrollCommand.Snap(newOffset))
+                }
+            }
+        }
+
         LaunchedEffect(scrollClampMin.value, scrollClampMax.value) {
             scrollOffset.updateBounds(scrollClampMin.value, scrollClampMax.value)
         }
@@ -642,6 +674,7 @@ fun ExperimentalLyrics(
                                     var dragging = false
                                     var accumulatedDrag = 0f
                                     var targetOffset = scrollOffset.value
+                                    dragTargetOffsetRef.value = targetOffset
                                     while (true) {
                                         val event = awaitPointerEvent(PointerEventPass.Initial)
                                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
@@ -652,11 +685,14 @@ fun ExperimentalLyrics(
                                             dragging = true
                                             isAutoScrollEnabled = false
                                             targetOffset = scrollOffset.value
+                                            dragTargetOffsetRef.value = targetOffset
                                             scrollCommands.trySend(ScrollCommand.Stop)
                                         }
                                         if (dragging && delta != 0f) {
-                                            targetOffset = (targetOffset - delta)
-                                                .coerceIn(scrollClampMin.value, scrollClampMax.value)
+                                            val (minClamp, maxClamp) = latestScrollLimits.value
+                                            targetOffset = (dragTargetOffsetRef.value - delta)
+                                                .coerceIn(minClamp, maxClamp)
+                                            dragTargetOffsetRef.value = targetOffset
                                             scrollCommands.trySend(ScrollCommand.Snap(targetOffset))
                                             tracker.addPointerInputChange(change)
                                             change.consume()
@@ -711,7 +747,7 @@ fun ExperimentalLyrics(
                                         color = expressiveAccent,
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .onSizeChanged { itemHeights[listIndex] = it.height }
+                                            .onSizeChanged { onItemHeightChanged.value(listIndex, it.height) }
                                             .padding(horizontal = 24.dp)
                                             .wrapContentWidth(Alignment.CenterHorizontally)
                                     )
@@ -734,7 +770,7 @@ fun ExperimentalLyrics(
                                         respectAgentPositioning = respectAgentPositioning, isAutoScrollEnabled = isAutoScrollEnabled,
                                         displayedCurrentLineIndex = if (isAutoScrollEnabled) anchoredLineIndex else index, romanizeAsMain = romanizeAsMain,
                                         enabledLanguages = enabledLanguages, romanizeLyrics = currentSong?.romanizeLyrics == true,
-                                        onSizeChanged = { itemHeights[listIndex] = it },
+                                        onSizeChanged = { onItemHeightChanged.value(listIndex, it) },
                                         onClick = {
                                             if (isSelectionModeActive) {
                                                 if (selectedIndices.contains(index)) {
